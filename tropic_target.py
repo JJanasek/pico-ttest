@@ -3,6 +3,7 @@
 #  * PlatformIOProject - builds and flashes the firmware with PlatformIO.
 #  * TropicTarget      - drives the firmware over a plain serial line.
 # This replaces the ChipWhisperer target/programmer that the old pico3000.py used.
+import collections
 import os
 import shutil
 import subprocess
@@ -13,7 +14,7 @@ import serial
 # Default location of the PlatformIO project holding tvla_target.cpp.
 DEFAULT_PROJECT_DIR = os.path.expanduser("~/Documents/PlatformIO/Projects/tropic")
 DEFAULT_ENV = "esp32dev_tvla"
-DEFAULT_PORT = "/dev/ttyACM0"
+DEFAULT_PORT = "/dev/ttyUSB0"
 DEFAULT_BAUD = 115200
 
 # TR01_CURVE_PRIVKEY_LEN: length of a private key / secret scalar accepted by eccKeyStore().
@@ -87,6 +88,8 @@ class TropicTarget:
         self.timeout = timeout
         self.verbose = verbose
         self.ser = None
+        # Rolling log of raw lines, so a failed handshake can report what the board actually sent.
+        self._recent = collections.deque(maxlen=8)
 
     # ------------------------------------------------------------------ lifecycle
     def open(self, ready_timeout=30.0):
@@ -95,22 +98,27 @@ class TropicTarget:
         # still be booting (and its banner may have been flushed on open). Alternate between
         # listening for '+READY' and pinging until one of them answers.
         deadline = time.time() + ready_timeout
-        last_error = None
         while time.time() < deadline:
+            # A '-ERR' here means the firmware booted and reported a real failure (e.g. the secure
+            # channel handshake) - it is never worth retrying, so let it propagate.
             try:
                 if self._read_reply(timeout=2.0).startswith("READY"):
                     print("[*] Target READY")
                     return self
-            except (TimeoutError, TargetError) as ex:
-                last_error = ex
+            except TimeoutError:
+                pass
             try:
                 self.ping()
                 print("[*] Target alive (answered ping)")
                 return self
-            except (TimeoutError, TargetError) as ex:
-                last_error = ex
-        raise TimeoutError(f"target on {self.port} did not come up within {ready_timeout}s "
-                           f"(last: {last_error})")
+            except TimeoutError:
+                pass
+
+        # Include whatever did come over the line - boot messages, a truncated banner or nothing
+        # at all all point at different problems.
+        seen = " | ".join(self._recent) if self._recent else "nothing received"
+        raise TimeoutError(f"target on {self.port} did not come up within {ready_timeout}s. "
+                           f"Last lines seen: {seen}")
 
     def close(self):
         if self.ser is not None:
@@ -131,6 +139,7 @@ class TropicTarget:
             line = self.ser.readline().decode("ascii", errors="replace").strip()
             if not line:
                 continue
+            self._recent.append(line)
             if line.startswith("#"):
                 if self.verbose:
                     print("    " + line)

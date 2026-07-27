@@ -15,7 +15,9 @@ captured with a PicoScope 3000. Replaces the previous ChipWhisperer-based flow.
 
 ## Hardware setup
 
-* ESP32 `GPIO25` → PicoScope **EXT** trigger input (change via `-DTVLA_TRIGGER_PIN=` in `platformio.ini`).
+* ESP32 `GPIO4` → PicoScope **EXT** trigger input (change via `-DTVLA_TRIGGER_PIN=` in `platformio.ini`).
+  GPIO4 is free only while `LT_USE_INT_PIN` is off; with it on, that pin is TROPIC01's interrupt
+  input and the build fails with an explicit error.
 * EM probe / shunt amplifier → PicoScope **channel A**.
 * ESP32 serial port on `/dev/ttyACM0` (override with `--port`).
 

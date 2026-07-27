@@ -78,7 +78,9 @@ def parse_args():
     p.add_argument("--volt-div", type=float, default=2e-1, help="volts per division")
     p.add_argument("--offset", type=float, default=0.0, help="analog offset in volts")
     p.add_argument("--sample-rate", type=float, default=12.5e6, help="sample rate in S/s")
-    p.add_argument("--samples", type=int, default=1_000_000, help="samples per trace")
+    p.add_argument("--samples", type=int, default=2_000_000,
+                   help="samples per trace. The default is a 160 ms window at 12.5 MS/s, sized to "
+                        "cover one ~123 ms TROPIC01 signature (2 MB per trace on disk)")
     p.add_argument("--pre-trigger", type=int, default=0, help="samples captured before the trigger")
     p.add_argument("--trigger-source", default="ext", choices=("ext", "A", "B", "C", "D"),
                    help="where the ESP32 trigger GPIO is wired. Ext exists only on 3000 Series D "
@@ -191,6 +193,8 @@ def main():
 
         collected = 0
         failures = 0
+        window_ms = 1e3 * args.samples / (scope.sampleRate if scope is not None else args.sample_rate)
+        window_checked = False
 
         while collected < args.traces:
             try:
@@ -201,7 +205,20 @@ def main():
                 if scope is not None:
                     scope.arm(preTrigger=args.pre_trigger)
 
+                sign_start = time.time()
                 target.sign(payload)
+                sign_ms = (time.time() - sign_start) * 1e3
+
+                # A signature longer than the capture window means every trace is cut short, which
+                # is invisible in the .trs file - say so on the first one rather than after 3000.
+                if not window_checked:
+                    window_checked = True
+                    print(f"[*] Signature takes ~{sign_ms:.0f} ms, capture window is "
+                          f"{window_ms:.0f} ms")
+                    if sign_ms > window_ms:
+                        print(f"[!] The window is shorter than a signature - traces will be "
+                              f"truncated. Raise --samples (>= {int(sign_ms * 1e-3 * args.sample_rate):,}) "
+                              f"or lower --sample-rate.")
 
                 if scope is not None:
                     samples, _raw = scope.getNativeSignalBytes()

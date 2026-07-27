@@ -10,6 +10,7 @@ captured with a PicoScope 3000. Replaces the previous ChipWhisperer-based flow.
 | [tvla_capture.py](tvla_capture.py) | main script: flashes the target, arms the scope, collects traces into a `.trs` file |
 | [tropic_target.py](tropic_target.py) | PlatformIO build/upload wrapper + serial client for the capture firmware |
 | [pico.py](pico.py) | PicoScope block-mode wrappers (`pico3000` / `pico5000` / `pico6000`) |
+| [trigger_check.py](trigger_check.py) | diagnostic: captures the trigger line untriggered during one signature |
 | [pico3000.py](pico3000.py) | old ChipWhisperer + STM32 script, kept for reference only |
 | `../../Documents/PlatformIO/Projects/tropic/src/tvla_target.cpp` | capture firmware (env `esp32dev_tvla`) |
 
@@ -18,10 +19,15 @@ captured with a PicoScope 3000. Replaces the previous ChipWhisperer-based flow.
 * ESP32 `GPIO4` → PicoScope trigger input (change via `-DTVLA_TRIGGER_PIN=` in `platformio.ini`).
   GPIO4 is free only while `LT_USE_INT_PIN` is off; with it on, that pin is TROPIC01's interrupt
   input and the build fails with an explicit error.
-  * **Only 3000 Series D models have the Ext input.** On an A/B model `ps3000aSetSimpleTrigger`
-    accepts Ext and returns `PICO_OK`, but `ps3000aRunBlock` then fails with `PICO_TRIGGER_ERROR`.
-    The scope prints its variant on connect; if it is not a D model, wire the trigger to an analog
-    channel and pass `--trigger-source B` (that channel gets enabled at ±5 V automatically).
+  * **Prefer an analog channel over Ext.** Only 3000 Series D models have an Ext input at all, and
+    even on a 3406D (which has one) `ps3000aRunBlock` rejected it with `PICO_TRIGGER_ERROR` —
+    `ps3000aSetSimpleTrigger` accepts an unusable source without complaint, so the failure only
+    surfaces at arm time. Wire the trigger to a channel and pass `--trigger-source B`; that channel
+    is enabled at ±5 V automatically. The scope prints its variant on connect.
+  * **Mind the probe attenuation.** A ×10 probe turns the 3.3 V GPIO pulse into ~0.33 V at the
+    scope, well under a 1.5 V threshold. Either switch the probe to ×1 or drop `--trigger-level`
+    to about half the observed peak. The same applies to the measurement channel: a ×10 probe
+    throws away 20 dB of the signal you are trying to analyse.
 * EM probe / shunt amplifier → PicoScope **channel A**.
 * ESP32 serial port on `/dev/ttyACM0` (override with `--port`).
 
@@ -73,9 +79,31 @@ python tvla_capture.py -n 3000 -c ed -m message --trigger-source B --trigger-lev
 python tvla_capture.py --no-scope --no-flash -n 20
 ```
 
-`--samples / --sample-rate` define the capture window (default 1 M samples at 12.5 MS/s ≈ 80 ms).
-Check with a single trace that the whole signature fits inside it before starting a long campaign.
+`--samples / --sample-rate` define the capture window. The default is 2 M samples at 12.5 MS/s
+= 160 ms, sized around a measured TROPIC01 Ed25519 signature of ~123 ms — at 2 MB per trace that
+is ~6 GB for 3000 traces, so trade `--sample-rate` against resolution if that is too much. The
+first captured trace prints the measured signature duration and warns if it exceeds the window
+(truncated traces are otherwise invisible in the `.trs` file).
+
 The two classes are interleaved at random per trace so slow drift affects both equally.
+
+### "scope did not trigger"
+
+The capture never accepts an untriggered trace (the driver's auto-trigger is disabled), so a
+timeout means no edge crossed the level. To see what the scope actually gets on the trigger line:
+
+```sh
+python trigger_check.py --channel B --level 1.5
+```
+
+It captures untriggered while the target signs once and reports the min/max level, whether a pulse
+crossed the threshold, its width and where it starts — plus the host-measured signature duration,
+which is what `--samples / --sample-rate` have to cover.
+
+If a pulse is there but too small, it is almost always probe attenuation (a ×10 probe shows a 3.3 V
+GPIO as ~0.33 V) — the script suggests a level to use. A line that is completely flat means the GPIO
+is not driving, is not connected to that channel, the probe ground is missing, or the pin is
+contended by something else driving it (TROPIC01's INT line sits on GPIO4).
 
 ### What each mode varies
 

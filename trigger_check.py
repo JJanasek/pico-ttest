@@ -75,14 +75,21 @@ def main():
 
         if not above.any():
             print(f"\n    -> No pulse above {args.level:.2f} V.")
-            if volts.max() < 0.3:
-                print("       The line stays low: the GPIO is not driving, is not connected to "
-                      "this channel, or something else is holding it down.")
+            if volts.max() < 0.1:
+                print("       The line is flat: the GPIO is not driving, is not connected to this "
+                      "channel, or the probe ground is missing.")
+                print("       If the trigger GPIO is one TROPIC01 also drives (its INT pin sits "
+                      "on GPIO4), the two outputs fight - move the trigger to a free pin.")
             else:
-                print(f"       The line does move (up to {volts.max():.2f} V) but never reaches "
-                      "the level - it is being loaded down, or the level is set too high.")
-            print("       If the trigger GPIO is one TROPIC01 also drives (e.g. its INT pin on "
-                  "the shield), the two outputs fight each other - move the trigger to a free pin.")
+                suggested = round(float(volts.max()) * 0.5, 2)
+                print(f"       There IS a pulse, peaking at {volts.max():.2f} V - it just never "
+                      f"reaches the {args.level:.2f} V level.")
+                # A 3.3V logic level arriving at ~0.33V is the classic x10 probe signature.
+                if 0.2 < volts.max() < 0.6:
+                    print(f"       {volts.max():.2f} V is about 3.3 V / 10: this looks like a x10 "
+                          "probe. Either switch the probe to x1, or keep x10 and lower the level.")
+                print(f"       Re-run with --level {suggested}, then capture with "
+                      f"--trigger-source {args.channel} --trigger-level {suggested}.")
         else:
             first = int(np.argmax(above))
             last = len(above) - 1 - int(np.argmax(above[::-1]))

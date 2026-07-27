@@ -223,8 +223,13 @@ class pico3000():
             print("\trange: +-{}V".format(ranges[rangeIdx]))
         return ranges[rangeIdx]
 
-    def setTriggerChannel(self, channel, enable=0, level=None, threshold=None, timeout=16384):
+    def setTriggerChannel(self, channel, enable=0, level=None, threshold=None, timeout=0):
         """Arms a simple rising-edge trigger.
+
+        timeout is the driver's autoTrigger_ms and defaults to 0 = wait indefinitely. A non-zero
+        value makes the scope capture anyway when no trigger arrives, which would quietly put
+        untriggered traces into the set; CAPTURE_TIMEOUT in getNativeSignalBytes bounds the wait
+        instead.
 
         level is in volts and is converted to ADC counts for the source: the Ext input is always
         +-5V full scale, an analog channel uses whatever range it was enabled with. threshold

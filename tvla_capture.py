@@ -9,18 +9,20 @@
 #
 # Flow per trace:
 #   1. (scalar mode only) write the class's private key into the slot - outside the trigger window,
-#   2. arm the scope (trigger = EXT, driven by TVLA_TRIGGER_PIN on the ESP32),
+#   2. arm the scope (triggered by TVLA_TRIGGER_PIN on the ESP32),
 #   3. sign the class's payload; the target raises the trigger for exactly the duration of the
 #      libtropic sign call,
 #   4. read the block back and append it to a .trs file, tagged with its class (0 = fixed,
 #      1 = random) so a Welch t-test can split the set afterwards.
 #
-# Wiring: ESP32 GPIO25 -> PicoScope EXT trigger input, EM/shunt probe -> channel A.
+# Wiring: ESP32 trigger GPIO -> a scope channel (--trigger-source, Ext is unreliable here),
+#         EM/shunt probe -> the measured channel (--channel, AC coupled).
 #
 # This replaces pico3000.py, which drove a ChipWhisperer target over simpleserial and flashed it
 # with make + cw.program_target.
 import argparse
 import os
+import shutil
 import time
 
 import numpy as np
@@ -73,7 +75,7 @@ def parse_args():
     p.add_argument("--no-flash", action="store_true",
                    help="skip the PlatformIO build/upload and talk to the firmware already on the board")
 
-    # Scope. Defaults assume a signature takes well under 80 ms; check with a single trace first.
+    # Scope. The window must cover a whole signature (~123 ms measured); the run reports it.
     p.add_argument("--channel", type=int, default=0, help="scope channel to measure (0 = A)")
     p.add_argument("--volt-div", type=float, default=1e-2,
                    help="volts per division on the measured channel; the range picked is 5x this "
@@ -83,7 +85,7 @@ def parse_args():
                         "EM trace so the small range is usable (default: AC)")
     p.add_argument("--offset", type=float, default=0.0, help="analog offset in volts")
     p.add_argument("--sample-rate", type=float, default=12.5e6, help="sample rate in S/s")
-    p.add_argument("--samples", type=int, default=2_000_000,
+    p.add_argument("--samples", type=lambda s: int(float(s)), default=2_000_000,
                    help="samples per trace. The default is a 160 ms window at 12.5 MS/s, sized to "
                         "cover one ~123 ms TROPIC01 signature (2 MB per trace on disk)")
     p.add_argument("--pre-trigger", type=int, default=0, help="samples captured before the trigger")
@@ -97,6 +99,22 @@ def parse_args():
 
     p.add_argument("-v", "--verbose", action="store_true", help="echo the target's '#' log lines")
     return p.parse_args()
+
+
+def check_disk_budget(args, n_samples):
+    """Traces are one byte per sample, so a long window times many traces adds up fast."""
+    projected = n_samples * args.traces
+    free = shutil.disk_usage(os.path.abspath(args.outdir) if os.path.isdir(args.outdir)
+                             else os.path.dirname(os.path.abspath(args.outdir)) or ".").free
+    gib = 1024 ** 3
+    print("[*] Trace file will be about {:.1f} GiB ({:,} samples x {:,} traces), {:.1f} GiB free"
+          .format(projected / gib, n_samples, args.traces, free / gib))
+    if projected > free:
+        raise RuntimeError(
+            "not enough free space: {:.1f} GiB needed, {:.1f} GiB available. Reduce --traces, "
+            "--samples or --sample-rate.".format(projected / gib, free / gib))
+    if projected > 0.8 * free:
+        print("[!] That is over 80% of the free space on this filesystem.")
 
 
 def open_trace_file(args, n_samples, volt_div, time_div):
@@ -192,6 +210,7 @@ def main():
     target = setup_target(args)
     try:
         if not args.no_scope:
+            check_disk_budget(args, args.samples)
             scope, volt_div, time_div = setup_scope(args)
             trace_path, trace_file = open_trace_file(args, args.samples, volt_div, time_div)
             print("[*] Writing " + trace_path)

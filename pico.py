@@ -44,17 +44,28 @@ def couplingValue(coupling):
 def argClosest(lst, K):
     return min(range(len(lst)), key = lambda i: abs(lst[i]-K))
 
-def rawToBytes(buffer, minADC, maxADC, n_points=None):
+def rawToBytes(buffer, minADC, maxADC, n_points=None, chunk=4_000_000):
     """Rescales a raw int16 ADC buffer to signed bytes (the .trs BYTE sample coding).
 
     Vectorized on purpose: the per-sample list comprehension this replaces took seconds per
-    trace once traces got long enough to hold a full public-key operation.
+    trace once traces got long enough to hold a full public-key operation. Converted in chunks
+    so a 50 M sample trace does not need a 200 MB float32 copy of itself.
     """
     raw = np.frombuffer(buffer, dtype=np.int16)
     if n_points is not None:
         raw = raw[:n_points]
-    scaled = 255.0 * (raw.astype(np.float32) - minADC) / (maxADC - minADC) - 255.0 / 2
-    return np.clip(np.rint(scaled), -128, 127).astype(np.int8), raw
+
+    out = np.empty(raw.size, dtype=np.int8)
+    scale = 255.0 / (maxADC - minADC)
+    for start in range(0, raw.size, chunk):
+        block = raw[start:start + chunk].astype(np.float32)
+        block -= minADC
+        block *= scale
+        block -= 255.0 / 2
+        np.rint(block, out=block)
+        np.clip(block, -128, 127, out=block)
+        out[start:start + chunk] = block.astype(np.int8)
+    return out, raw
 
 class pico3000():
 
@@ -170,9 +181,17 @@ class pico3000():
 
         # Create buffers ready for assigning pointers for data collection
         self.channel_out = (ctypes.c_int16 * self.n_points)()
-        self.bufferAMin = (ctypes.c_int16 * self.n_points)() # used for downsampling which isn't in the scope of this example
-        self.status["SetDataBuffers"] = ps3.ps3000aSetDataBuffers(self.chandle, channel, ctypes.byref(self.channel_out), ctypes.byref(self.bufferAMin), self.n_points, 0, 0)# Setting the data buffer location for data collection from channel A
-        assert_pico_ok(self.status["SetDataBuffers"])
+        # The second (min) buffer only carries data for aggregate downsampling, which this wrapper
+        # never enables - at 50M samples it is 100 MB of waste, so use the single-buffer call and
+        # keep the two-buffer one as a fallback.
+        self.bufferAMin = None
+        try:
+            self.status["SetDataBuffers"] = ps3.ps3000aSetDataBuffer(self.chandle, channel, ctypes.byref(self.channel_out), self.n_points, 0, 0)
+            assert_pico_ok(self.status["SetDataBuffers"])
+        except (AttributeError, PicoSDKCtypesError):
+            self.bufferAMin = (ctypes.c_int16 * self.n_points)()
+            self.status["SetDataBuffers"] = ps3.ps3000aSetDataBuffers(self.chandle, channel, ctypes.byref(self.channel_out), ctypes.byref(self.bufferAMin), self.n_points, 0, 0)# Setting the data buffer location for data collection from channel A
+            assert_pico_ok(self.status["SetDataBuffers"])
 
         # Creates a overlow location for data
         self.overflow = (ctypes.c_int16)()

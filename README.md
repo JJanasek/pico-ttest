@@ -15,9 +15,13 @@ captured with a PicoScope 3000. Replaces the previous ChipWhisperer-based flow.
 
 ## Hardware setup
 
-* ESP32 `GPIO4` → PicoScope **EXT** trigger input (change via `-DTVLA_TRIGGER_PIN=` in `platformio.ini`).
+* ESP32 `GPIO4` → PicoScope trigger input (change via `-DTVLA_TRIGGER_PIN=` in `platformio.ini`).
   GPIO4 is free only while `LT_USE_INT_PIN` is off; with it on, that pin is TROPIC01's interrupt
   input and the build fails with an explicit error.
+  * **Only 3000 Series D models have the Ext input.** On an A/B model `ps3000aSetSimpleTrigger`
+    accepts Ext and returns `PICO_OK`, but `ps3000aRunBlock` then fails with `PICO_TRIGGER_ERROR`.
+    The scope prints its variant on connect; if it is not a D model, wire the trigger to an analog
+    channel and pass `--trigger-source B` (that channel gets enabled at ±5 V automatically).
 * EM probe / shunt amplifier → PicoScope **channel A**.
 * ESP32 serial port on `/dev/ttyACM0` (override with `--port`).
 
@@ -61,6 +65,9 @@ python tvla_capture.py -n 3000 -c ed -m message
 
 # EdDSA, fixed vs random SECRET SCALAR (message stays fixed, key rewritten per trace)
 python tvla_capture.py -n 3000 -c ed -m scalar --no-flash
+
+# scope without an Ext input: trigger from channel B at 1.5V instead
+python tvla_capture.py -n 3000 -c ed -m message --trigger-source B --trigger-level 1.5
 
 # no scope attached - drive the target only, e.g. while setting trigger/gain up in the Pico GUI
 python tvla_capture.py --no-scope --no-flash -n 20

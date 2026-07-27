@@ -26,7 +26,7 @@ import time
 import numpy as np
 import trsfile
 
-from pico import pico3000
+from pico import PS3000A_EXTERNAL, pico3000
 from tropic_target import (
     DEFAULT_BAUD,
     DEFAULT_ENV,
@@ -80,6 +80,11 @@ def parse_args():
     p.add_argument("--sample-rate", type=float, default=12.5e6, help="sample rate in S/s")
     p.add_argument("--samples", type=int, default=1_000_000, help="samples per trace")
     p.add_argument("--pre-trigger", type=int, default=0, help="samples captured before the trigger")
+    p.add_argument("--trigger-source", default="ext", choices=("ext", "A", "B", "C", "D"),
+                   help="where the ESP32 trigger GPIO is wired. Ext exists only on 3000 Series D "
+                        "models; on A/B models use an analog channel (default: ext)")
+    p.add_argument("--trigger-level", type=float, default=1.5,
+                   help="trigger threshold in volts (default: 1.5, mid-rail for 3.3V logic)")
     p.add_argument("--no-scope", action="store_true",
                    help="drive the target without capturing (useful while setting the scope up)")
 
@@ -123,7 +128,16 @@ def setup_scope(args):
           "\n\tvoltDiv: {:e}\n\tvoltRange: {}\n\ttimeDiv: {:e}\n\tsampleRate: {:e}"
           "\n\twindow: {:.3f} ms".format(volt_div, scope.voltRange, time_div, sample_rate,
                                          1e3 * args.samples / sample_rate))
-    scope.setTriggerChannel(4, enable=1)  # 4 = EXT, driven by the ESP32 trigger GPIO
+    if args.trigger_source == "ext":
+        trigger_channel = PS3000A_EXTERNAL
+    else:
+        trigger_channel = "ABCD".index(args.trigger_source)
+        if trigger_channel == args.channel:
+            raise ValueError("the trigger channel must differ from the measured channel")
+        # An analog trigger only fires if its channel is enabled; 3.3V logic needs a +-5V range.
+        scope.enableChannel(trigger_channel, rangeVolts=5.0)
+
+    scope.setTriggerChannel(trigger_channel, enable=1, level=args.trigger_level)
     return scope, volt_div, time_div
 
 

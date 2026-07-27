@@ -9,6 +9,7 @@ from picosdk.ps3000a import ps3000a as ps3
 from picosdk.ps5000 import ps5000 as ps5
 from picosdk.ps6000 import ps6000 as ps6
 import ctypes
+import re
 import time
 from picosdk.functions import adc2mV, assert_pico_ok
 
@@ -16,6 +17,20 @@ DEBUG_MODE = True
 
 # How long a single armed block may take to trigger and transfer before we give up, in seconds.
 CAPTURE_TIMEOUT = 10.0
+
+# Trigger sources. Only the 3000 Series *D* models have the Ext input; on A/B models
+# ps3000aSetSimpleTrigger still returns PICO_OK for it, but ps3000aRunBlock then fails with
+# PICO_TRIGGER_ERROR (see the A API Programmer's Guide, "External trigger input").
+PS3000A_EXTERNAL = 4
+# The Ext input is fixed at +-5 V, scaled to +-32767 regardless of the channel ranges.
+PS3000A_EXT_MAX_VALUE = 32767
+PS3000A_EXT_RANGE_V = 5.0
+
+CHANNEL_NAMES = {0: "A", 1: "B", 2: "C", 3: "D", PS3000A_EXTERNAL: "EXT"}
+
+
+def channelName(channel):
+    return CHANNEL_NAMES.get(channel, str(channel))
 
 def argClosest(lst, K):
     return min(range(len(lst)), key = lambda i: abs(lst[i]-K))
@@ -51,7 +66,11 @@ class pico3000():
         self.overflow = None
         self.cmaxSamples = None
         self.n_points = 0
-        self.model = ctypes.c_char_p(b"Unknown")
+        # Mutable buffer: the driver writes the variant string into it (a c_char_p would point at
+        # an immutable bytes literal).
+        self.model = ctypes.create_string_buffer(32)
+        self.variant = "Unknown"
+        self.channelRanges = {}  # channel -> full scale in volts, for trigger level conversion
         self.requiredSize = ctypes.c_int16()
         self.available_ranges = (ctypes.c_int32 * 15)()
         self.number_of_ranges = ctypes.c_int32(15)
@@ -73,8 +92,14 @@ class pico3000():
         try:
             assert_pico_ok(self.status["openunit"])
             print("[*] Picoscope CONNECTED")
-            self.status["getinfo"] = ps3.ps3000aGetUnitInfo(self.chandle, self.model, 6, ctypes.byref(self.requiredSize), 3)
+            # 3 = PICO_VARIANT_INFO. Worth printing: only D models have the Ext trigger input.
+            self.status["getinfo"] = ps3.ps3000aGetUnitInfo(self.chandle, self.model, ctypes.sizeof(self.model), ctypes.byref(self.requiredSize), 3)
             assert_pico_ok(self.status["getinfo"])
+            self.variant = self.model.value.decode(errors="replace")
+            print("[*] Picoscope model: PicoScope {}".format(self.variant))
+            if not self.hasExtTrigger():
+                print("[!] Model {} has no Ext trigger input (D models only) - trigger on an "
+                      "analog channel instead".format(self.variant))
         except:
             # powerstate becomes the status number of openunit
             powerstate = self.status["openunit"]
@@ -109,6 +134,7 @@ class pico3000():
 
         self.status["setChA"] = ps3.ps3000aSetChannel(self.chandle, channel, 1, ps3.PS3000A_COUPLING['PS3000A_DC'], self.chARange, offset)# Set up channel A
         assert_pico_ok(self.status["setChA"])
+        self.channelRanges[channel] = self.RANGES[self.chARange]
         # Disable other channels
         for ch in range(1,4):
             self.status["setChB"] = ps3.ps3000aSetChannel(self.chandle, (channel + ch)%4, 0, ps3.PS3000A_COUPLING['PS3000A_DC'], self.chARange, 0)
@@ -154,7 +180,7 @@ class pico3000():
 
         if(DEBUG_MODE):
             print("Measure channel")
-            print("\tchannel: " + list(ps3.PS3000A_CHANNEL.items())[channel][0])
+            print("\tchannel: " + channelName(channel))
             print("\tScope state:")
             print("\tsampleRate: {:e}Hz".format(sampleRate))
             print("\tn_points: {}".format(self.n_points))
@@ -163,21 +189,95 @@ class pico3000():
             print(self.status)
         return self.voltDiv, self.timeDiv, self.sampleRate
 
-    def setTriggerChannel(self, channel, enable=0, threshold=1024, timeout=16384):
+    def hasExtTrigger(self):
+        """True unless the variant string clearly names a non-D model (only D models have Ext)."""
+        match = re.match(r"\s*(\d{4})\s*([A-Za-z])", self.variant)
+        if not match:
+            return True  # unknown variant - do not second-guess the user
+        return match.group(2).upper() == "D"
+
+    def enableChannel(self, channel, rangeVolts, offset=0.0):
+        """Enables an extra channel, e.g. one used only as an analog trigger source.
+
+        No data buffer is attached: an analog trigger only requires its channel to be enabled.
+        """
+        ranges = {x: ps3.PICO_VOLTAGE_RANGE[x] for x in self.available_ranges[:self.number_of_ranges.value]}
+        # Smallest range that still fits the signal (never one that would clip it).
+        fitting = sorted((v, k) for k, v in ranges.items() if v >= rangeVolts)
+        rangeIdx = fitting[0][1] if fitting else max((v, k) for k, v in ranges.items())[1]
+        self.status["setChTrig"] = ps3.ps3000aSetChannel(self.chandle, channel, 1, ps3.PS3000A_COUPLING['PS3000A_DC'], rangeIdx, offset)
+        assert_pico_ok(self.status["setChTrig"])
+        self.channelRanges[channel] = ranges[rangeIdx]
+
+        # Enabling a second channel can restrict the available timebases, so re-validate the one
+        # chosen in setChannel rather than failing later inside RunBlock.
+        if self.n_points:
+            timeIntervalns = ctypes.c_float()
+            returnedMaxSamples = ctypes.c_int16()
+            self.status["GetTimebaseTrig"] = ps3.ps3000aGetTimebase2(self.chandle, self.timebase, self.n_points, ctypes.byref(timeIntervalns), 1, ctypes.byref(returnedMaxSamples), 0)
+            assert_pico_ok(self.status["GetTimebaseTrig"])
+
+        if(DEBUG_MODE):
+            print("Trigger channel enabled")
+            print("\tchannel: {}".format(channelName(channel)))
+            print("\trange: +-{}V".format(ranges[rangeIdx]))
+        return ranges[rangeIdx]
+
+    def setTriggerChannel(self, channel, enable=0, level=None, threshold=None, timeout=16384):
+        """Arms a simple rising-edge trigger.
+
+        level is in volts and is converted to ADC counts for the source: the Ext input is always
+        +-5V full scale, an analog channel uses whatever range it was enabled with. threshold
+        still accepts raw counts for callers that want them.
+        """
+        if threshold is None:
+            level = 1.5 if level is None else level
+            if channel == PS3000A_EXTERNAL:
+                threshold = int(round(level / PS3000A_EXT_RANGE_V * PS3000A_EXT_MAX_VALUE))
+            else:
+                fullScale = self.channelRanges.get(channel)
+                if fullScale is None:
+                    raise ValueError(
+                        "channel {} must be enabled before it can trigger - call enableChannel() "
+                        "or setChannel() for it first".format(channelName(channel)))
+                threshold = int(round(level / fullScale * self.maxADC.value))
+
+        # ps3000aSetSimpleTrigger takes the threshold as an int16 and would silently truncate.
+        if not -32767 <= threshold <= 32767:
+            raise ValueError(
+                "trigger threshold {} counts is out of range for channel {} - the level ({}V) "
+                "exceeds the channel's range".format(threshold, channelName(channel), level))
+
+        if channel == PS3000A_EXTERNAL and not self.hasExtTrigger():
+            print("[!] Arming the Ext trigger on model {}, which has no Ext input - "
+                  "ps3000aRunBlock will most likely fail with PICO_TRIGGER_ERROR"
+                  .format(self.variant))
+
         self.status["trigger"] = ps3.ps3000aSetSimpleTrigger(self.chandle, enable, channel, threshold, ps3.PS3000A_THRESHOLD_DIRECTION['PS3000A_RISING'], 0, timeout)# Sets up single trigger
         assert_pico_ok(self.status["trigger"])
 
         if(DEBUG_MODE):
             print("Trigger channel")
-            print("\tchannel: " + list(ps3.PS3000A_CHANNEL.items())[channel][0])
+            print("\tchannel: {}".format(channelName(channel)))
+            print("\tthreshold: {} counts{}".format(threshold, "" if level is None else " (~{:.2f}V)".format(level)))
             print("\ttimeout: " + str(timeout))
 
 
     def arm(self, preTrigger=0):
+        # Stop any capture still running from the previous block before re-arming.
+        ps3.ps3000aStop(self.chandle)
         # Starts block capture
-        self.status["runblock"] = ps3.ps3000aRunBlock(self.chandle, preTrigger, self.n_points, self.timebase, 1, None, 0, None, None)
-        assert_pico_ok(self.status["runblock"])
-        
+        self.status["runblock"] = ps3.ps3000aRunBlock(self.chandle, preTrigger, self.n_points - preTrigger, self.timebase, 1, None, 0, None, None)
+        try:
+            assert_pico_ok(self.status["runblock"])
+        except PicoSDKCtypesError as ex:
+            if "PICO_TRIGGER_ERROR" in str(ex):
+                raise PicoSDKCtypesError(
+                    "{} - the trigger source is not usable on this device. The Ext input exists "
+                    "only on 3000 Series D models (this one reports '{}'); trigger on an analog "
+                    "channel instead.".format(ex, self.variant)) from ex
+            raise
+
         if(DEBUG_MODE):
             print("Block capture started.")
 
@@ -321,7 +421,7 @@ class pico5000():
 
         if(DEBUG_MODE):
             print("Measure channel")
-            print("\tchannel: " + list(ps5.PS5000_CHANNEL.items())[channel][0])
+            print("\tchannel: " + channelName(channel))
             print("\tScope state:")
             print("\tsampleRate: {:e}Hz".format(sampleRate))
             print("\tn_points: {}".format(self.n_points))
@@ -336,7 +436,7 @@ class pico5000():
 
         if(DEBUG_MODE):
             print("Trigger channel")
-            print("\tchannel: " + list(ps5.PS5000_CHANNEL.items())[channel][0])
+            print("\tchannel: " + channelName(channel))
             print("\ttimeout: " + str(timeout))
 
 
@@ -480,7 +580,7 @@ class pico6000():
 
         if(DEBUG_MODE):
             print("Measure channel")
-            print("\tchannel: " + list(ps6.PS6000_CHANNEL.items())[channel][0])
+            print("\tchannel: " + channelName(channel))
             print("\tScope state:")
             print("\tsampleRate: {:e}Hz".format(sampleRate))
             print("\tn_points: {}".format(self.n_points))
@@ -495,7 +595,7 @@ class pico6000():
 
         if(DEBUG_MODE):
             print("Trigger channel")
-            print("\tchannel: " + list(ps6.PS6000_CHANNEL.items())[channel][0])
+            print("\tchannel: " + channelName(channel))
             print("\ttimeout: " + str(timeout))
 
 

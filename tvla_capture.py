@@ -75,7 +75,12 @@ def parse_args():
 
     # Scope. Defaults assume a signature takes well under 80 ms; check with a single trace first.
     p.add_argument("--channel", type=int, default=0, help="scope channel to measure (0 = A)")
-    p.add_argument("--volt-div", type=float, default=2e-1, help="volts per division")
+    p.add_argument("--volt-div", type=float, default=1e-2,
+                   help="volts per division on the measured channel; the range picked is 5x this "
+                        "(default: 0.01 = +-50mV)")
+    p.add_argument("--coupling", default="AC", choices=("AC", "DC"),
+                   help="coupling of the measured channel. AC removes the DC bias of a power or "
+                        "EM trace so the small range is usable (default: AC)")
     p.add_argument("--offset", type=float, default=0.0, help="analog offset in volts")
     p.add_argument("--sample-rate", type=float, default=12.5e6, help="sample rate in S/s")
     p.add_argument("--samples", type=int, default=2_000_000,
@@ -124,12 +129,12 @@ def setup_scope(args):
     scope.connect()
     volt_div, time_div, sample_rate = scope.setChannel(
         args.channel, args.volt_div, args.sample_rate,
-        n_points=args.samples, offset=args.offset
+        n_points=args.samples, offset=args.offset, coupling=args.coupling
     )
     print("Scope settings:"
-          "\n\tvoltDiv: {:e}\n\tvoltRange: {}\n\ttimeDiv: {:e}\n\tsampleRate: {:e}"
-          "\n\twindow: {:.3f} ms".format(volt_div, scope.voltRange, time_div, sample_rate,
-                                         1e3 * args.samples / sample_rate))
+          "\n\tvoltDiv: {:e} ({} coupled)\n\tvoltRange: {}\n\ttimeDiv: {:e}\n\tsampleRate: {:e}"
+          "\n\twindow: {:.3f} ms".format(volt_div, args.coupling, scope.voltRange, time_div,
+                                         sample_rate, 1e3 * args.samples / sample_rate))
     if args.trigger_source == "ext":
         trigger_channel = PS3000A_EXTERNAL
     else:

@@ -32,6 +32,15 @@ CHANNEL_NAMES = {0: "A", 1: "B", 2: "C", 3: "D", PS3000A_EXTERNAL: "EXT"}
 def channelName(channel):
     return CHANNEL_NAMES.get(channel, str(channel))
 
+
+def couplingValue(coupling):
+    """Maps 'AC'/'DC' onto the driver's coupling enum."""
+    key = "PS3000A_" + str(coupling).upper()
+    if key not in ps3.PS3000A_COUPLING:
+        raise ValueError("unknown coupling {!r}, expected one of {}".format(
+            coupling, sorted(k.split("_")[-1] for k in ps3.PS3000A_COUPLING)))
+    return ps3.PS3000A_COUPLING[key]
+
 def argClosest(lst, K):
     return min(range(len(lst)), key = lambda i: abs(lst[i]-K))
 
@@ -117,7 +126,7 @@ class pico3000():
 
             assert_pico_ok(self.status["ChangePowerSource"])
 
-    def setChannel(self, channel, voltsPerDivision, sampleRate, timeDiv=None, n_points=None, offset=0):
+    def setChannel(self, channel, voltsPerDivision, sampleRate, timeDiv=None, n_points=None, offset=0, coupling='DC'):
         # timeDiv is only a hint: the achievable sample rate is quantized to the scope's timebase
         # grid, so the effective timeDiv is recomputed from n_points below and returned.
         if n_points is None:
@@ -132,7 +141,7 @@ class pico3000():
         self.voltDiv = self.RANGES[self.chARange]/5 #update selected voltDiv
         self.voltRange = list(ps3.PS3000A_RANGE.keys())[self.chARange]
 
-        self.status["setChA"] = ps3.ps3000aSetChannel(self.chandle, channel, 1, ps3.PS3000A_COUPLING['PS3000A_DC'], self.chARange, offset)# Set up channel A
+        self.status["setChA"] = ps3.ps3000aSetChannel(self.chandle, channel, 1, couplingValue(coupling), self.chARange, offset)# Set up channel A
         assert_pico_ok(self.status["setChA"])
         self.channelRanges[channel] = self.RANGES[self.chARange]
         # Disable other channels
@@ -196,16 +205,18 @@ class pico3000():
             return True  # unknown variant - do not second-guess the user
         return match.group(2).upper() == "D"
 
-    def enableChannel(self, channel, rangeVolts, offset=0.0):
+    def enableChannel(self, channel, rangeVolts, offset=0.0, coupling='DC'):
         """Enables an extra channel, e.g. one used only as an analog trigger source.
 
         No data buffer is attached: an analog trigger only requires its channel to be enabled.
+        Coupling stays DC by default: AC coupling makes a long logic-high pulse droop back towards
+        zero, so a level trigger on it would only see the edge.
         """
         ranges = {x: ps3.PICO_VOLTAGE_RANGE[x] for x in self.available_ranges[:self.number_of_ranges.value]}
         # Smallest range that still fits the signal (never one that would clip it).
         fitting = sorted((v, k) for k, v in ranges.items() if v >= rangeVolts)
         rangeIdx = fitting[0][1] if fitting else max((v, k) for k, v in ranges.items())[1]
-        self.status["setChTrig"] = ps3.ps3000aSetChannel(self.chandle, channel, 1, ps3.PS3000A_COUPLING['PS3000A_DC'], rangeIdx, offset)
+        self.status["setChTrig"] = ps3.ps3000aSetChannel(self.chandle, channel, 1, couplingValue(coupling), rangeIdx, offset)
         assert_pico_ok(self.status["setChTrig"])
         self.channelRanges[channel] = ranges[rangeIdx]
 

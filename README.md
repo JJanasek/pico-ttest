@@ -28,7 +28,9 @@ captured with a PicoScope 3000. Replaces the previous ChipWhisperer-based flow.
     scope, well under a 1.5 V threshold. Either switch the probe to ×1 or drop `--trigger-level`
     to about half the observed peak. The same applies to the measurement channel: a ×10 probe
     throws away 20 dB of the signal you are trying to analyse.
-* EM probe / shunt amplifier → PicoScope **channel A**.
+* EM probe / shunt amplifier → PicoScope **channel A**, AC coupled at ±50 mV
+  (`--coupling AC --volt-div 0.01`, the defaults). AC coupling drops the DC bias so the small
+  range is usable on the trace itself.
 * ESP32 serial port on `/dev/ttyACM0` (override with `--port`).
 
 The firmware raises the trigger pin for exactly the duration of the libtropic sign call, so the
@@ -72,8 +74,11 @@ python tvla_capture.py -n 3000 -c ed -m message
 # EdDSA, fixed vs random SECRET SCALAR (message stays fixed, key rewritten per trace)
 python tvla_capture.py -n 3000 -c ed -m scalar --no-flash
 
-# scope without an Ext input: trigger from channel B at 1.5V instead
-python tvla_capture.py -n 3000 -c ed -m message --trigger-source B --trigger-level 1.5
+# trigger from channel B; 0.21V suits a x10 probe on the 3.3V GPIO (x1 probe: use 1.5)
+python tvla_capture.py -n 3000 -c ed -m message --trigger-source B --trigger-level 0.21
+
+# explicit acquisition settings (these are the defaults): AC coupled, +-50mV on the probe
+python tvla_capture.py -n 3000 -c ed -m message --coupling AC --volt-div 0.01
 
 # no scope attached - drive the target only, e.g. while setting trigger/gain up in the Pico GUI
 python tvla_capture.py --no-scope --no-flash -n 20

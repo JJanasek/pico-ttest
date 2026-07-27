@@ -12,7 +12,7 @@ import time
 import serial
 
 # Default location of the PlatformIO project holding tvla_target.cpp.
-DEFAULT_PROJECT_DIR = os.path.expanduser("~/Documents/PlatformIO/Projects/tropic")
+DEFAULT_PROJECT_DIR = os.path.expanduser("/home/xjanasek/Documents/PlatformIO/Projects/Tropic test/")
 DEFAULT_ENV = "esp32dev_tvla"
 DEFAULT_PORT = "/dev/ttyUSB0"
 DEFAULT_BAUD = 115200

@@ -150,8 +150,11 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0):
 
     headers = {
         trsfile.Header.TRS_VERSION: 2,
+        # The trigger position goes in the description: TRS headers are written unsigned, so the
+        # negative OFFSET_X that would express it cannot be stored.
         trsfile.Header.DESCRIPTION:
-            f"TROPIC01 {CURVE_NAMES[args.curve]} fixed-vs-random {args.mode} TVLA",
+            f"TROPIC01 {CURVE_NAMES[args.curve]} fixed-vs-random {args.mode} TVLA; "
+            f"pre_trigger={int(pre_trigger)} samples",
         trsfile.Header.NUMBER_SAMPLES: int(n_samples),
         trsfile.Header.LENGTH_DATA: 1,
         trsfile.Header.SAMPLE_CODING: trsfile.SampleCoding.BYTE,
@@ -164,10 +167,6 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0):
                 trsfile.traceparameter.ParameterType.BYTE, 1, 0)}
         ),
     }
-    # Record where the trigger sits, so the analysis knows sample 0 is not the trigger edge.
-    # OFFSET_X is optional in the TRS spec, hence the guard.
-    if pre_trigger and hasattr(trsfile.Header, "OFFSET_X"):
-        headers[trsfile.Header.OFFSET_X] = -int(pre_trigger)
     return path, trsfile.trs_open(path, mode="w", headers=headers)
 
 

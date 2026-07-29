@@ -251,8 +251,14 @@ def main():
 
         collected = 0
         failures = 0
-        window_ms = 1e3 * args.samples / (scope.sampleRate if scope is not None else args.sample_rate)
+        sample_rate = scope.sampleRate if scope is not None else args.sample_rate
+        window_ms = 1e3 * args.samples / sample_rate
         window_checked = False
+        # How long the scope needs to fill its pre-trigger buffer, plus a margin.
+        pre_trigger_wait = (pre_trigger / sample_rate) * 1.1 + 0.005 if pre_trigger else 0.0
+        if pre_trigger_wait:
+            print(f"[*] Holding each command back {pre_trigger_wait*1e3:.0f} ms so the trigger "
+                  f"edge falls after the pre-trigger window")
 
         while collected < args.traces:
             try:
@@ -262,6 +268,12 @@ def main():
 
                 if scope is not None:
                     scope.arm(preTrigger=pre_trigger)
+                    # The scope only honours the trigger once the pre-trigger samples have been
+                    # collected. Send the command after that window has elapsed, otherwise the
+                    # rising edge lands during the fill and is dropped - and since the line then
+                    # stays high for the whole signature, no second edge ever arrives.
+                    if pre_trigger_wait:
+                        time.sleep(pre_trigger_wait)
 
                 sign_start = time.time()
                 target.sign(payload)

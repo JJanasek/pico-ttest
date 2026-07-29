@@ -105,6 +105,12 @@ It captures untriggered while the target signs once and reports the min/max leve
 crossed the threshold, its width and where it starts — plus the host-measured signature duration,
 which is what `--samples / --sample-rate` have to cover.
 
+With `--pre-trigger`, the scope cannot honour the trigger until it has collected that many samples
+first. The capture therefore holds each sign command back for the fill duration — without that, the
+edge lands during the fill and is dropped, and because the line then stays high for the whole
+signature no second edge ever arrives. A level that works in the PicoScope GUI but never fires here
+is this, not the level.
+
 If a pulse is there but too small, it is almost always probe attenuation (a ×10 probe shows a 3.3 V
 GPIO as ~0.33 V) — the script suggests a level to use. A line that is completely flat means the GPIO
 is not driving, is not connected to that channel, the probe ground is missing, or the pin is

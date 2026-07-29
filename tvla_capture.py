@@ -88,17 +88,42 @@ def parse_args():
     p.add_argument("--samples", type=lambda s: int(float(s)), default=2_000_000,
                    help="samples per trace. The default is a 160 ms window at 12.5 MS/s, sized to "
                         "cover one ~123 ms TROPIC01 signature (2 MB per trace on disk)")
-    p.add_argument("--pre-trigger", type=int, default=0, help="samples captured before the trigger")
+    p.add_argument("--pre-trigger", default="0",
+                   help="samples captured before the trigger edge: a count, a fraction (0.1) or a "
+                        "percentage of --samples (10%%). Default: 0")
     p.add_argument("--trigger-source", default="ext", choices=("ext", "A", "B", "C", "D"),
                    help="where the ESP32 trigger GPIO is wired. Ext exists only on 3000 Series D "
                         "models; on A/B models use an analog channel (default: ext)")
     p.add_argument("--trigger-level", type=float, default=1.5,
                    help="trigger threshold in volts (default: 1.5, mid-rail for 3.3V logic)")
+    p.add_argument("--trigger-range", type=float, default=5.0,
+                   help="full scale of the trigger channel in volts, DC coupled (default: 5.0)")
     p.add_argument("--no-scope", action="store_true",
                    help="drive the target without capturing (useful while setting the scope up)")
 
     p.add_argument("-v", "--verbose", action="store_true", help="echo the target's '#' log lines")
     return p.parse_args()
+
+
+def preTriggerSamples(spec, n_samples):
+    """Resolves --pre-trigger: '10%' or '0.1' are fractions of the window, anything else a count."""
+    text = str(spec).strip()
+    if text.endswith("%"):
+        fraction = float(text[:-1]) / 100.0
+    else:
+        value = float(text)
+        if value >= 1 or value == 0:
+            fraction = None
+        else:
+            fraction = value
+        if fraction is None:
+            samples = int(value)
+            if not 0 <= samples < n_samples:
+                raise ValueError(f"--pre-trigger {spec} is not within the {n_samples} sample window")
+            return samples
+    if not 0 <= fraction < 1:
+        raise ValueError(f"--pre-trigger {spec} must be under 100% of the window")
+    return int(round(fraction * n_samples))
 
 
 def check_disk_budget(args, n_samples):
@@ -117,7 +142,7 @@ def check_disk_budget(args, n_samples):
         print("[!] That is over 80% of the free space on this filesystem.")
 
 
-def open_trace_file(args, n_samples, volt_div, time_div):
+def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0):
     os.makedirs(args.outdir, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
     path = os.path.join(args.outdir,
@@ -139,10 +164,14 @@ def open_trace_file(args, n_samples, volt_div, time_div):
                 trsfile.traceparameter.ParameterType.BYTE, 1, 0)}
         ),
     }
+    # Record where the trigger sits, so the analysis knows sample 0 is not the trigger edge.
+    # OFFSET_X is optional in the TRS spec, hence the guard.
+    if pre_trigger and hasattr(trsfile.Header, "OFFSET_X"):
+        headers[trsfile.Header.OFFSET_X] = -int(pre_trigger)
     return path, trsfile.trs_open(path, mode="w", headers=headers)
 
 
-def setup_scope(args):
+def setup_scope(args, pre_trigger=0):
     scope = pico3000()
     scope.connect()
     volt_div, time_div, sample_rate = scope.setChannel(
@@ -151,16 +180,19 @@ def setup_scope(args):
     )
     print("Scope settings:"
           "\n\tvoltDiv: {:e} ({} coupled)\n\tvoltRange: {}\n\ttimeDiv: {:e}\n\tsampleRate: {:e}"
-          "\n\twindow: {:.3f} ms".format(volt_div, args.coupling, scope.voltRange, time_div,
-                                         sample_rate, 1e3 * args.samples / sample_rate))
+          "\n\twindow: {:.3f} ms ({:.3f} ms before the trigger, {:.3f} ms after)"
+          .format(volt_div, args.coupling, scope.voltRange, time_div, sample_rate,
+                  1e3 * args.samples / sample_rate, 1e3 * pre_trigger / sample_rate,
+                  1e3 * (args.samples - pre_trigger) / sample_rate))
     if args.trigger_source == "ext":
         trigger_channel = PS3000A_EXTERNAL
     else:
         trigger_channel = "ABCD".index(args.trigger_source)
         if trigger_channel == args.channel:
             raise ValueError("the trigger channel must differ from the measured channel")
-        # An analog trigger only fires if its channel is enabled; 3.3V logic needs a +-5V range.
-        scope.enableChannel(trigger_channel, rangeVolts=5.0)
+        # An analog trigger only fires if its channel is enabled, and it stays DC coupled so a
+        # long logic-high pulse does not droop back below the level.
+        scope.enableChannel(trigger_channel, rangeVolts=args.trigger_range)
 
     scope.setTriggerChannel(trigger_channel, enable=1, level=args.trigger_level)
     return scope, volt_div, time_div
@@ -206,13 +238,16 @@ def main():
     scope = None
     trace_file = None
     trace_path = None
+    # Resolved before anything is opened, so a bad value fails immediately.
+    pre_trigger = preTriggerSamples(args.pre_trigger, args.samples)
 
     target = setup_target(args)
     try:
         if not args.no_scope:
             check_disk_budget(args, args.samples)
-            scope, volt_div, time_div = setup_scope(args)
-            trace_path, trace_file = open_trace_file(args, args.samples, volt_div, time_div)
+            scope, volt_div, time_div = setup_scope(args, pre_trigger)
+            trace_path, trace_file = open_trace_file(args, args.samples, volt_div, time_div,
+                                                     pre_trigger)
             print("[*] Writing " + trace_path)
 
         collected = 0
@@ -227,7 +262,7 @@ def main():
                 payload = prepare_trial(args, target, trace_class)
 
                 if scope is not None:
-                    scope.arm(preTrigger=args.pre_trigger)
+                    scope.arm(preTrigger=pre_trigger)
 
                 sign_start = time.time()
                 target.sign(payload)

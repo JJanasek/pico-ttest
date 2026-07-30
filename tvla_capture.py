@@ -66,6 +66,10 @@ def parse_args():
                    help="what the fixed-vs-random split varies: the signed message (default) "
                         "or the secret scalar in the key slot")
     p.add_argument("-o", "--outdir", default="traces", help="directory for the .trs file")
+    p.add_argument("--traces-per-file", type=int, default=0,
+                   help="roll over to a new .trs every N traces (0 = one file). A .trs is only "
+                        "readable once closed, so on a long campaign this bounds what an "
+                        "interrupted run loses")
 
     # Target / firmware.
     p.add_argument("--project-dir", default=DEFAULT_PROJECT_DIR, help="PlatformIO project path")
@@ -142,11 +146,12 @@ def check_disk_budget(args, n_samples):
         print("[!] That is over 80% of the free space on this filesystem.")
 
 
-def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0):
+def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, path=None):
     os.makedirs(args.outdir, exist_ok=True)
-    stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-    path = os.path.join(args.outdir,
-                        f"TROPIC01_{args.curve}_{args.mode}_{args.traces}_{stamp}.trs")
+    if path is None:
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        path = os.path.join(args.outdir,
+                            f"TROPIC01_{args.curve}_{args.mode}_{args.traces}_{stamp}.trs")
 
     headers = {
         trsfile.Header.TRS_VERSION: 2,
@@ -168,6 +173,52 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0):
         ),
     }
     return path, trsfile.trs_open(path, mode="w", headers=headers)
+
+
+class TraceWriter:
+    """Writes traces to one .trs, or to a series of them when --traces-per-file is set.
+
+    A .trs only becomes readable when it is closed - trsfile finalises the header there, and an
+    interrupted file fails to open with "TRS file has an unexpected length". On a campaign that
+    runs for hours, rolling to a new file every N traces keeps everything collected so far safe.
+    """
+
+    def __init__(self, args, n_samples, volt_div, time_div, pre_trigger=0):
+        self._args = args
+        self._header_args = (n_samples, volt_div, time_div, pre_trigger)
+        self._per_file = args.traces_per_file
+        self._stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        self._file = None
+        self._index = 0
+        self._in_file = 0
+        self.paths = []
+        self._roll()
+
+    def _path(self):
+        name = f"TROPIC01_{self._args.curve}_{self._args.mode}_{self._args.traces}_{self._stamp}"
+        if self._per_file:
+            name += f"_part{self._index:03d}"
+        return os.path.join(self._args.outdir, name + ".trs")
+
+    def _roll(self):
+        self.close()
+        path = self._path()
+        _, self._file = open_trace_file(self._args, *self._header_args, path=path)
+        self.paths.append(path)
+        self._index += 1
+        self._in_file = 0
+        print("[*] Writing " + path)
+
+    def append(self, trace):
+        if self._per_file and self._in_file >= self._per_file:
+            self._roll()
+        self._file.append(trace)
+        self._in_file += 1
+
+    def close(self):
+        if self._file is not None:
+            self._file.close()
+            self._file = None
 
 
 def setup_scope(args, pre_trigger=0):
@@ -235,8 +286,7 @@ def main():
     start_time = time.time()
 
     scope = None
-    trace_file = None
-    trace_path = None
+    writer = None
     # Resolved before anything is opened, so a bad value fails immediately.
     pre_trigger = preTriggerSamples(args.pre_trigger, args.samples)
 
@@ -245,9 +295,7 @@ def main():
         if not args.no_scope:
             check_disk_budget(args, args.samples)
             scope, volt_div, time_div = setup_scope(args, pre_trigger)
-            trace_path, trace_file = open_trace_file(args, args.samples, volt_div, time_div,
-                                                     pre_trigger)
-            print("[*] Writing " + trace_path)
+            writer = TraceWriter(args, args.samples, volt_div, time_div, pre_trigger)
 
         collected = 0
         failures = 0
@@ -292,7 +340,7 @@ def main():
 
                 if scope is not None:
                     samples, _raw = scope.getNativeSignalBytes()
-                    trace_file.append(trsfile.Trace(
+                    writer.append(trsfile.Trace(
                         trsfile.SampleCoding.BYTE,
                         samples,
                         trsfile.parametermap.TraceParameterMap(
@@ -312,11 +360,13 @@ def main():
 
         print(f"Done: {collected} traces, {failures} retries")
         print(f"Total time: {time.time() - start_time:.1f}s")
-        if trace_path:
-            print("TRSFILE: " + trace_path)
+        if writer is not None:
+            for path in writer.paths:
+                print("TRSFILE: " + path)
     finally:
-        if trace_file is not None:
-            trace_file.close()
+        # Closing is what makes the files readable, so it happens even on an aborted run.
+        if writer is not None:
+            writer.close()
         if scope is not None:
             scope.disconnect()
         target.close()

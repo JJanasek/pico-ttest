@@ -118,6 +118,14 @@ class HuskyScope():
         # raises out of _dict_repr() before the setup is applied.
         self.scope.default_setup(verbose=False)
 
+        # default_setup() routes the clock generator to HS2, which is pin 6 of the same 20-pin
+        # header the trigger and ground wires are on - so the Husky drives a square wave at the
+        # ADC clock frequency straight into the target's breadboard. At 200 MS/s that is 200 MHz
+        # of aggressor next to a secure element that watches for exactly this kind of thing, and
+        # TROPIC01 dropped into alarm mode a trace into a 200 MS/s campaign. Nothing here clocks
+        # the target - the ESP32 runs off its own crystal - so the output is pure downside.
+        self.scope.io.hs2 = None
+
         if DEBUG_MODE:
             print("Connected to {} (serial {})".format(
                 self.scope._getCWType(), self.scope.sn))

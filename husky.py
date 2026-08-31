@@ -303,7 +303,13 @@ class HuskyScope():
                 "tiling needs decimate == 1 (offset counts ADC clocks, not decimated samples); "
                 "the requested rate decimates by {}".format(self.decimate))
         self.tile = index
-        self.scope.adc.offset = self.skip_samples + index * self.n_points
+        offset = self.skip_samples + index * self.n_points
+        # Only touch the register when the window actually moves. Tile 0 is already where
+        # setChannel() left it, and re-writing OFFSET_ADDR immediately before arm() is the one
+        # thing that differs between a tiled run and the single-window capture that works at the
+        # identical rate and offset - so the redundant write is worth not making.
+        if offset != self.scope.adc.offset:
+            self.scope.adc.offset = offset
 
     def arm(self, preTrigger=0):
         if self.scope is None:

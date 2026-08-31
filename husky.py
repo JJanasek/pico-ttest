@@ -69,6 +69,15 @@ CAPTURE_TIMEOUT = 10.0
 DEBUG_MODE = True
 
 
+class FifoError(IOError):
+    """Raised when a capture overran Husky's FIFOs and lost samples.
+
+    Distinct from the TimeoutError a missed trigger raises, because the two need opposite
+    responses: a timeout is retried as-is, while an overrun wedges the capture datapath and
+    every later arm fails until the scope is rebuilt.
+    """
+
+
 class HuskyScope():
     """Block-mode (or streaming) capture on a ChipWhisperer-Husky.
 
@@ -350,7 +359,7 @@ class HuskyScope():
         # would notice. Reject the trace instead of writing it to the .trs.
         errors = str(scope.adc.errors or "")
         if "overflow" in errors or "underflow" in errors:
-            raise IOError(
+            raise FifoError(
                 "Husky FIFO error at {:.1f} MS/s, tile {}, offset {:,} ADC clocks ({:.2f} ms) "
                 "({}) - samples were lost, so this trace is not trustworthy. Note that block "
                 "mode at 200 MS/s with only the 2 ms skip has run a clean 100 trace campaign, "

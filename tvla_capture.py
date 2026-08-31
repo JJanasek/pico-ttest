@@ -41,6 +41,7 @@ from husky import (
     MAX_STREAM_RATE as HUSKY_MAX_STREAM_RATE,
     DEFAULT_TRIGGER_PIN as HUSKY_DEFAULT_TRIGGER_PIN,
     TRIGGER_PINS as HUSKY_TRIGGER_PINS,
+    FifoError,
     HuskyScope,
 )
 from tropic_target import (
@@ -429,6 +430,9 @@ def main():
 
         collected = 0
         failures = 0
+        # Counted separately from the total: the abort is about a run that has stopped making
+        # progress, not about a long campaign that collected a few duds along the way.
+        consecutive = 0
         sample_rate = scope.sampleRate if scope is not None else args.sample_rate
         window_ms = 1e3 * args.samples * args.tiles / sample_rate
         window_checked = False
@@ -515,13 +519,33 @@ def main():
 
                 # Incremented only on success, so a dropped capture is retried rather than lost.
                 collected += 1
+                consecutive = 0
                 if collected % 100 == 0:
                     print(f"    {collected}/{args.traces}")
             except Exception as ex:
                 failures += 1
+                consecutive += 1
                 print(f"ERROR ({failures}): {ex}")
-                if failures > max(20, args.traces // 10):
-                    raise RuntimeError("too many consecutive failures, aborting") from ex
+
+                # An overrun wedges the capture datapath, and a bare re-arm then fails forever -
+                # which is how one bad window turns into a whole run of identical errors. Rebuild
+                # the scope before retrying rather than hammering a dead device.
+                if scope is not None and isinstance(ex, FifoError):
+                    print("[*] Rebuilding the scope connection after the FIFO error")
+                    try:
+                        scope.disconnect()
+                        scope, _vd, _td, _ly = setup_scope(args, pre_trigger)
+                    except Exception as rex:
+                        raise RuntimeError(
+                            "Husky did not come back after a FIFO error - a reconnect only resets "
+                            "FPGA registers, so if the capture datapath is wedged it needs a "
+                            "physical power cycle. Unplug it, plug it back in, and restart."
+                        ) from rex
+
+                if consecutive > max(20, args.traces // 10):
+                    raise RuntimeError(
+                        f"aborting after {consecutive} failures in a row ({failures} total)"
+                    ) from ex
 
         print(f"Done: {collected} traces, {failures} retries")
         print(f"Total time: {time.time() - start_time:.1f}s")

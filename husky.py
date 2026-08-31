@@ -267,6 +267,25 @@ class HuskyScope():
         if DEBUG_MODE and enable:
             print("Trigger: rising edge on {}".format(self.trigger_pin))
 
+    def set_tile(self, index):
+        """Moves the capture window to tile `index`, for covering a long operation in slices.
+
+        Husky's buffer is 131,070 samples however fast the ADC runs, so a high-rate capture only
+        ever sees a short window. Stepping adc.offset by one window per tile walks that window
+        along the operation; tile 0 starts at skip_ms, tile 1 one window later, and so on, so the
+        tiles butt up against each other and concatenate into a continuous span.
+
+        Only meaningful at decimate == 1: offset counts ADC clocks, which equal samples only when
+        nothing is being dropped.
+        """
+        if self.scope is None:
+            raise RuntimeError("scope is not connected")
+        if self.decimate != 1:
+            raise ValueError(
+                "tiling needs decimate == 1 (offset counts ADC clocks, not decimated samples); "
+                "the requested rate decimates by {}".format(self.decimate))
+        self.scope.adc.offset = self.skip_samples + index * self.n_points
+
     def arm(self, preTrigger=0):
         if self.scope is None:
             raise RuntimeError("scope is not connected")

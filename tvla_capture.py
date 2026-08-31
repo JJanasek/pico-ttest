@@ -130,6 +130,13 @@ def parse_args():
                         "default: %(default)s). The "
                         "trigger GPIO's own edge couples into the measurement and clips the ADC; "
                         "skipping past it lets --gain-db be set for the signature instead")
+    p.add_argument("--tiles", type=int, default=1,
+                   help="capture each trace as N consecutive windows and concatenate them "
+                        "(Husky, default: 1 = off). Husky holds 131,070 samples however fast the "
+                        "ADC runs, so this is the only way to get high bandwidth over a long "
+                        "span: every tile signs the SAME payload with the SAME key, and Ed25519 "
+                        "is deterministic, so the tiles observe one computation through "
+                        "successive windows. Costs one signature per tile per trace")
     p.add_argument("--stream", action=argparse.BooleanOptionalAction, default=True,
                    help="stream samples (default) instead of filling Husky's 131,070 sample "
                         "buffer. Streaming keeps decimate at 1 - no aliasing - and lifts the "
@@ -163,6 +170,15 @@ def parse_args():
         args.sample_rate = HUSKY_DEFAULT_SAMPLE_RATE if args.scope == "husky" else 12.5e6
     if args.samples is None:
         args.samples = HUSKY_DEFAULT_SAMPLES if args.scope == "husky" else 2_000_000
+
+    if args.tiles < 1:
+        p.error("--tiles must be at least 1")
+    if args.tiles > 1:
+        if args.scope != "husky":
+            p.error("--tiles is a Husky-only workaround for its 131,070 sample buffer")
+        if args.stream:
+            p.error("--tiles needs --no-stream: tiling exists to get high bandwidth out of block "
+                    "mode, and streaming already lifts the depth limit at up to 10 MS/s")
     return args
 
 
@@ -218,6 +234,8 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, label_y=
                     .format(args.gain_db, args.gain_mode, args.sample_rate / 1e6, args.samples,
                             args.skip_ms, "stream" if args.stream else "block",
                             args.trigger_pin))
+        if args.tiles > 1:
+            settings += " tiles={}x{}".format(args.tiles, args.samples)
     else:
         settings = ("pico ch{} {:.4g}V/div {} {:.3f}MS/s x{} samples"
                     .format(args.channel, args.volt_div, args.coupling,
@@ -399,14 +417,15 @@ def main():
     target = setup_target(args)
     try:
         if not args.no_scope:
-            check_disk_budget(args, args.samples)
+            check_disk_budget(args, args.samples * args.tiles)
             scope, volt_div, time_div, label_y = setup_scope(args, pre_trigger)
-            writer = TraceWriter(args, args.samples, volt_div, time_div, pre_trigger, label_y)
+            writer = TraceWriter(args, args.samples * args.tiles, volt_div, time_div,
+                                 pre_trigger, label_y)
 
         collected = 0
         failures = 0
         sample_rate = scope.sampleRate if scope is not None else args.sample_rate
-        window_ms = 1e3 * args.samples / sample_rate
+        window_ms = 1e3 * args.samples * args.tiles / sample_rate
         window_checked = False
         # How long the scope needs to fill its pre-trigger buffer, plus a margin.
         pre_trigger_wait = (pre_trigger / sample_rate) * 1.1 + 0.005 if pre_trigger else 0.0
@@ -420,25 +439,47 @@ def main():
                 trace_class = CLASS_FIXED if np.random.randint(0, 2) == 0 else CLASS_RANDOM
                 payload = prepare_trial(args, target, trace_class)
 
-                if scope is not None:
-                    scope.arm(preTrigger=pre_trigger)
-                    # The scope only honours the trigger once the pre-trigger samples have been
-                    # collected. Send the command after that window has elapsed, otherwise the
-                    # rising edge lands during the fill and is dropped - and since the line then
-                    # stays high for the whole signature, no second edge ever arrives.
-                    if pre_trigger_wait:
-                        time.sleep(pre_trigger_wait)
-
+                # One signature per tile, all signing the same payload with the same key.
+                # Ed25519 derives its nonce from the message, so every repetition is the same
+                # computation - which is what makes the windows safe to concatenate.
+                tile_samples = []
                 sign_start = time.time()
-                target.sign(payload)
-                sign_ms = (time.time() - sign_start) * 1e3
+                for tile in range(args.tiles):
+                    if scope is not None:
+                        if args.tiles > 1:
+                            scope.set_tile(tile)
+                        scope.arm(preTrigger=pre_trigger)
+                        # The scope only honours the trigger once the pre-trigger samples have
+                        # been collected. Send the command after that window has elapsed,
+                        # otherwise the rising edge lands during the fill and is dropped - and
+                        # since the line then stays high for the whole signature, no second edge
+                        # ever arrives.
+                        if pre_trigger_wait:
+                            time.sleep(pre_trigger_wait)
+
+                    tile_start = time.time()
+                    target.sign(payload)
+                    tile_ms = (time.time() - tile_start) * 1e3
+
+                    if scope is not None:
+                        chunk, _raw = scope.getNativeSignalBytes()
+                        tile_samples.append(chunk)
+                # Per-signature duration, so the window check below compares like with like even
+                # when a trace is assembled from several of them.
+                sign_ms = tile_ms
+                total_ms = (time.time() - sign_start) * 1e3
 
                 # A signature longer than the capture window means every trace is cut short, which
                 # is invisible in the .trs file - say so on the first one rather than after 3000.
                 if not window_checked:
                     window_checked = True
                     print(f"[*] Signature takes ~{sign_ms:.0f} ms (host measured, including "
-                          f"serial round-trip), capture window is {window_ms:.0f} ms")
+                          f"serial round-trip), capture window is {window_ms:.1f} ms")
+                    if args.tiles > 1:
+                        print(f"[*] {args.tiles} tiles x {args.samples:,} samples at "
+                              f"{sample_rate/1e6:.0f} MS/s = {window_ms:.1f} ms covered, "
+                              f"{args.tiles * args.samples:,} samples per trace "
+                              f"({args.tiles} signatures, {total_ms/1e3:.1f} s per trace)")
                     if sign_ms > window_ms:
                         # Not necessarily a fault: on Husky a partial window is the default,
                         # because dropping the tail is what buys decimate=1 and the resolution
@@ -451,7 +492,7 @@ def main():
                               f"lower --sample-rate.")
 
                 if scope is not None:
-                    samples, _raw = scope.getNativeSignalBytes()
+                    samples = b"".join(tile_samples)
                     writer.append(trsfile.Trace(
                         trsfile.SampleCoding.BYTE,
                         samples,

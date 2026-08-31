@@ -520,6 +520,7 @@ def main():
                 # Incremented only on success, so a dropped capture is retried rather than lost.
                 collected += 1
                 consecutive = 0
+                rebuilt = False
                 if collected % 100 == 0:
                     print(f"    {collected}/{args.traces}")
             except Exception as ex:
@@ -531,10 +532,23 @@ def main():
                 # which is how one bad window turns into a whole run of identical errors. Rebuild
                 # the scope before retrying rather than hammering a dead device.
                 if scope is not None and isinstance(ex, FifoError):
+                    # A rebuild that is immediately followed by another FIFO error means the
+                    # datapath is wedged, not merely upset: reconnecting re-runs the FPGA
+                    # register setup but does not reset the analog/USB path, so retrying can only
+                    # fail the same way. Say so once rather than grinding through every retry.
+                    if rebuilt:
+                        raise RuntimeError(
+                            "Husky failed again immediately after a reconnect, so its capture "
+                            "datapath is wedged - reconnecting only resets FPGA registers. "
+                            "Unplug it, plug it back in, and restart. If this keeps happening, "
+                            "lower --sample-rate: 200 MS/s block mode leaves no FIFO drain "
+                            "margin and has wedged after a few hundred captures."
+                        ) from ex
                     print("[*] Rebuilding the scope connection after the FIFO error")
                     try:
                         scope.disconnect()
                         scope, _vd, _td, _ly = setup_scope(args, pre_trigger)
+                        rebuilt = True
                     except Exception as rex:
                         raise RuntimeError(
                             "Husky did not come back after a FIFO error - a reconnect only resets "

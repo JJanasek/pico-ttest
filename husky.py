@@ -304,10 +304,14 @@ class HuskyScope():
                 "the requested rate decimates by {}".format(self.decimate))
         self.tile = index
         offset = self.skip_samples + index * self.n_points
-        # Only touch the register when the window actually moves. Tile 0 is already where
-        # setChannel() left it, and re-writing OFFSET_ADDR immediately before arm() is the one
-        # thing that differs between a tiled run and the single-window capture that works at the
-        # identical rate and offset - so the redundant write is worth not making.
+        # Only touch the register when the window actually moves. Writing OFFSET_ADDR the value
+        # it already holds breaks the next capture: at 200 MS/s every tiled run failed on tile 0
+        # with 'slow FIFO underflow, fast FIFO overflow', while the identical single-window
+        # capture - same rate, same 400,000 clock offset, but no redundant write - ran clean.
+        # Tile 0 is already where setChannel() left it, so it is the only tile that makes a
+        # no-op write. Skipping it fixed tiling outright: tiles 1-76 write a *changed* offset
+        # immediately before arm() and are fine, so it is specifically the redundant write that
+        # upsets the FPGA, not writing the register late.
         if offset != self.scope.adc.offset:
             self.scope.adc.offset = offset
 

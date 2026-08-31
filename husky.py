@@ -95,6 +95,7 @@ class HuskyScope():
         self.n_points = 0
         self.presamples = 0
         self.skip_samples = 0
+        self.tile = 0
         # Named for symmetry with pico3000, which prints it after setChannel(). Husky's input
         # range is set by the LNA gain, so what a full-scale sample corresponds to in volts
         # depends on gain_db and on the probe - the traces are stored normalised instead.
@@ -284,6 +285,7 @@ class HuskyScope():
             raise ValueError(
                 "tiling needs decimate == 1 (offset counts ADC clocks, not decimated samples); "
                 "the requested rate decimates by {}".format(self.decimate))
+        self.tile = index
         self.scope.adc.offset = self.skip_samples + index * self.n_points
 
     def arm(self, preTrigger=0):
@@ -337,9 +339,14 @@ class HuskyScope():
         errors = str(scope.adc.errors or "")
         if "overflow" in errors or "underflow" in errors:
             raise IOError(
-                "Husky FIFO error at {:.1f} MS/s ({}) - samples were lost, so this trace is not "
-                "trustworthy. Lower --sample-rate; 10 MS/s is proven on this rig over a full "
-                "campaign.".format(self.sampleRate / 1e6, errors.strip().rstrip(",")))
+                "Husky FIFO error at {:.1f} MS/s, tile {}, offset {:,} ADC clocks ({:.2f} ms) "
+                "({}) - samples were lost, so this trace is not trustworthy. Note that block "
+                "mode at 200 MS/s with only the 2 ms skip has run a clean 100 trace campaign, "
+                "so a high rate on its own is not enough to cause this; a large offset is the "
+                "other thing that provokes it. Bisect by sweeping --skip-ms at a fixed rate."
+                .format(self.sampleRate / 1e6, self.tile, self.scope.adc.offset,
+                        1e3 * self.scope.adc.offset / self.sampleRate,
+                        errors.strip().rstrip(",")))
 
         self._report_errors(float(np.mean((out >= 127) | (out <= -128))))
         return out.astype(np.int8).tobytes(), raw

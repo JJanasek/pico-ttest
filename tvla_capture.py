@@ -1,6 +1,6 @@
 ## tvla_capture.py
 # Non-specific (fixed vs random) TVLA trace collection for TROPIC01 on an ESP32, captured with
-# a PicoScope 3000.
+# a ChipWhisperer-Husky (default) or a PicoScope 3000 (--scope pico).
 #
 # Two campaigns, selected with --mode:
 #   message  the key stays fixed, the signed message is either FIXED or fresh RANDOM,
@@ -15,8 +15,11 @@
 #   4. read the block back and append it to a .trs file, tagged with its class (0 = fixed,
 #      1 = random) so a Welch t-test can split the set afterwards.
 #
-# Wiring: ESP32 trigger GPIO -> a scope channel (--trigger-source, Ext is unreliable here),
-#         EM/shunt probe -> the measured channel (--channel, AC coupled).
+# Wiring, Husky:  ESP32 trigger GPIO -> 20-pin pin 16 (TIO4), ESP32 GND -> pin 17/19,
+#                 shunt -> MEASURE SMA (differential across a high-side shunt, single-ended
+#                 plus the short-circuit cap for a low-side one).
+# Wiring, Pico:   ESP32 trigger GPIO -> a scope channel (--trigger-source, Ext is unreliable
+#                 here), EM/shunt probe -> the measured channel (--channel, AC coupled).
 #
 # This replaces pico3000.py, which drove a ChipWhisperer target over simpleserial and flashed it
 # with make + cw.program_target.
@@ -28,7 +31,18 @@ import time
 import numpy as np
 import trsfile
 
-from pico import PS3000A_EXTERNAL, pico3000
+# chipwhisperer is imported inside HuskyScope.connect(), so this stays cheap when --scope pico.
+from husky import (
+    DEFAULT_ADC_FREQ as HUSKY_DEFAULT_ADC_FREQ,
+    DEFAULT_GAIN_DB as HUSKY_DEFAULT_GAIN_DB,
+    DEFAULT_SAMPLE_RATE as HUSKY_DEFAULT_SAMPLE_RATE,
+    DEFAULT_SAMPLES as HUSKY_DEFAULT_SAMPLES,
+    DEFAULT_SKIP_MS as HUSKY_DEFAULT_SKIP_MS,
+    MAX_STREAM_RATE as HUSKY_MAX_STREAM_RATE,
+    DEFAULT_TRIGGER_PIN as HUSKY_DEFAULT_TRIGGER_PIN,
+    TRIGGER_PINS as HUSKY_TRIGGER_PINS,
+    HuskyScope,
+)
 from tropic_target import (
     DEFAULT_BAUD,
     DEFAULT_ENV,
@@ -56,8 +70,12 @@ CLASS_RANDOM = 1
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Fixed-vs-random TVLA trace collection for TROPIC01 (ESP32 target, PicoScope 3000)"
+        description="Fixed-vs-random TVLA trace collection for TROPIC01 (ESP32 target, "
+                    "ChipWhisperer-Husky or PicoScope 3000)"
     )
+
+    p.add_argument("--scope", choices=("husky", "pico"), default="husky",
+                   help="capture hardware (default: husky)")
 
     p.add_argument("-n", "--traces", type=int, default=3000, help="number of traces to collect")
     p.add_argument("-c", "--curve", choices=("ed", "ec"), default="ed",
@@ -79,7 +97,47 @@ def parse_args():
     p.add_argument("--no-flash", action="store_true",
                    help="skip the PlatformIO build/upload and talk to the firmware already on the board")
 
-    # Scope. The window must cover a whole signature (~123 ms measured); the run reports it.
+    # Acquisition, both scopes. The window must cover a whole signature (~123 ms measured);
+    # the run reports the measured duration on the first trace.
+    p.add_argument("--sample-rate", type=float, default=None,
+                   help="sample rate in S/s (default: 10M on Husky, 12.5M on a PicoScope)")
+    p.add_argument("--samples", type=lambda s: int(float(s)), default=None,
+                   help="samples per trace. Husky defaults to 500,000 = the first 50 ms of "
+                        "the ~101 ms signature at 10 MS/s; a PicoScope to 2,000,000 = 160 ms at "
+                        "12.5 MS/s, covering the whole of it")
+    p.add_argument("--pre-trigger", default="0",
+                   help="samples captured before the trigger edge: a count, a fraction (0.1) or a "
+                        "percentage of --samples (10%%). Default: 0")
+    p.add_argument("--no-scope", action="store_true",
+                   help="drive the target without capturing (useful while setting the scope up)")
+
+    # Husky. One AC-coupled MEASURE input, so there is no channel, coupling or volts/division to
+    # choose - the LNA gain sets the range instead.
+    p.add_argument("--gain-db", type=float, default=HUSKY_DEFAULT_GAIN_DB,
+                   help="Husky LNA gain in dB, -6.5 to 55 (default: %(default)s). The capture "
+                        "warns when the ADC clips or when the trace uses too little of its range")
+    p.add_argument("--gain-mode", choices=("high", "low"), default="high",
+                   help="Husky LNA gain mode (default: high)")
+    p.add_argument("--trigger-pin", default=HUSKY_DEFAULT_TRIGGER_PIN, choices=HUSKY_TRIGGER_PINS,
+                   help="Husky input the ESP32 trigger GPIO is wired to: tio1-4 and nrst are on "
+                        "the 20-pin header (tio4 is pin 16), aux is the AUX MCX "
+                        "(default: %(default)s)")
+    p.add_argument("--adc-freq", type=float, default=HUSKY_DEFAULT_ADC_FREQ,
+                   help="Husky ADC clock in Hz; --sample-rate is reached by decimating from it "
+                        "(default: %(default)s)")
+    p.add_argument("--skip-ms", type=float, default=HUSKY_DEFAULT_SKIP_MS,
+                   help="discard this many ms after the trigger before recording (Husky, "
+                        "default: %(default)s). The "
+                        "trigger GPIO's own edge couples into the measurement and clips the ADC; "
+                        "skipping past it lets --gain-db be set for the signature instead")
+    p.add_argument("--stream", action=argparse.BooleanOptionalAction, default=True,
+                   help="stream samples (default) instead of filling Husky's 131,070 sample "
+                        "buffer. Streaming keeps decimate at 1 - no aliasing - and lifts the "
+                        "depth limit, at up to ~10 MS/s and with no pre-trigger samples. "
+                        "--no-stream reverts to the decimated block mode, which is the only way "
+                        "to cover the whole signature in one window")
+
+    # PicoScope only.
     p.add_argument("--channel", type=int, default=0, help="scope channel to measure (0 = A)")
     p.add_argument("--volt-div", type=float, default=1e-2,
                    help="volts per division on the measured channel; the range picked is 5x this "
@@ -88,13 +146,6 @@ def parse_args():
                    help="coupling of the measured channel. AC removes the DC bias of a power or "
                         "EM trace so the small range is usable (default: AC)")
     p.add_argument("--offset", type=float, default=0.0, help="analog offset in volts")
-    p.add_argument("--sample-rate", type=float, default=12.5e6, help="sample rate in S/s")
-    p.add_argument("--samples", type=lambda s: int(float(s)), default=2_000_000,
-                   help="samples per trace. The default is a 160 ms window at 12.5 MS/s, sized to "
-                        "cover one ~123 ms TROPIC01 signature (2 MB per trace on disk)")
-    p.add_argument("--pre-trigger", default="0",
-                   help="samples captured before the trigger edge: a count, a fraction (0.1) or a "
-                        "percentage of --samples (10%%). Default: 0")
     p.add_argument("--trigger-source", default="ext", choices=("ext", "A", "B", "C", "D"),
                    help="where the ESP32 trigger GPIO is wired. Ext exists only on 3000 Series D "
                         "models; on A/B models use an analog channel (default: ext)")
@@ -102,11 +153,17 @@ def parse_args():
                    help="trigger threshold in volts (default: 1.5, mid-rail for 3.3V logic)")
     p.add_argument("--trigger-range", type=float, default=5.0,
                    help="full scale of the trigger channel in volts, DC coupled (default: 5.0)")
-    p.add_argument("--no-scope", action="store_true",
-                   help="drive the target without capturing (useful while setting the scope up)")
 
     p.add_argument("-v", "--verbose", action="store_true", help="echo the target's '#' log lines")
-    return p.parse_args()
+
+    args = p.parse_args()
+    # The two scopes have nothing like the same capture depth, so their sensible defaults differ:
+    # Husky's whole buffer is 131,070 samples, which covers a ~123 ms signature only at 800 kS/s.
+    if args.sample_rate is None:
+        args.sample_rate = HUSKY_DEFAULT_SAMPLE_RATE if args.scope == "husky" else 12.5e6
+    if args.samples is None:
+        args.samples = HUSKY_DEFAULT_SAMPLES if args.scope == "husky" else 2_000_000
+    return args
 
 
 def preTriggerSamples(spec, n_samples):
@@ -146,12 +203,25 @@ def check_disk_budget(args, n_samples):
         print("[!] That is over 80% of the free space on this filesystem.")
 
 
-def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, path=None):
+def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, label_y="V", path=None):
     os.makedirs(args.outdir, exist_ok=True)
     if path is None:
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
         path = os.path.join(args.outdir,
                             f"TROPIC01_{args.curve}_{args.mode}_{args.traces}_{stamp}.trs")
+
+    # The acquisition settings go in the description because nothing else in the .trs records
+    # them: two runs of the same campaign at different gains produce files that look nothing
+    # alike, and without this there is no way to tell them apart afterwards.
+    if args.scope == "husky":
+        settings = ("husky gain={:.1f}dB/{} {:.3f}MS/s x{} samples skip={:.2f}ms {} trig={}"
+                    .format(args.gain_db, args.gain_mode, args.sample_rate / 1e6, args.samples,
+                            args.skip_ms, "stream" if args.stream else "block",
+                            args.trigger_pin))
+    else:
+        settings = ("pico ch{} {:.4g}V/div {} {:.3f}MS/s x{} samples"
+                    .format(args.channel, args.volt_div, args.coupling,
+                            args.sample_rate / 1e6, args.samples))
 
     headers = {
         trsfile.Header.TRS_VERSION: 2,
@@ -159,12 +229,12 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, path=Non
         # negative OFFSET_X that would express it cannot be stored.
         trsfile.Header.DESCRIPTION:
             f"TROPIC01 {CURVE_NAMES[args.curve]} fixed-vs-random {args.mode} TVLA; "
-            f"pre_trigger={int(pre_trigger)} samples",
+            f"pre_trigger={int(pre_trigger)} samples; {settings}",
         trsfile.Header.NUMBER_SAMPLES: int(n_samples),
         trsfile.Header.LENGTH_DATA: 1,
         trsfile.Header.SAMPLE_CODING: trsfile.SampleCoding.BYTE,
         trsfile.Header.LABEL_X: "s",
-        trsfile.Header.LABEL_Y: "V",
+        trsfile.Header.LABEL_Y: label_y,
         trsfile.Header.SCALE_X: 10 * time_div / n_samples,
         trsfile.Header.SCALE_Y: 10 * volt_div / np.iinfo(np.uint8).max,
         trsfile.Header.TRACE_PARAMETER_DEFINITIONS: trsfile.parametermap.TraceParameterDefinitionMap(
@@ -183,9 +253,9 @@ class TraceWriter:
     runs for hours, rolling to a new file every N traces keeps everything collected so far safe.
     """
 
-    def __init__(self, args, n_samples, volt_div, time_div, pre_trigger=0):
+    def __init__(self, args, n_samples, volt_div, time_div, pre_trigger=0, label_y="V"):
         self._args = args
-        self._header_args = (n_samples, volt_div, time_div, pre_trigger)
+        self._header_args = (n_samples, volt_div, time_div, pre_trigger, label_y)
         self._per_file = args.traces_per_file
         self._stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
         self._file = None
@@ -222,6 +292,42 @@ class TraceWriter:
 
 
 def setup_scope(args, pre_trigger=0):
+    """Connects and configures the capture hardware.
+
+    Returns (scope, volt_div, time_div, label_y). The last three only feed the .trs header:
+    a PicoScope trace is in volts, a Husky one is a fraction of ADC full scale (what that is in
+    volts depends on the LNA gain and on the probe, so it is not recorded as volts).
+    """
+    if args.scope == "husky":
+        return setup_husky(args, pre_trigger)
+    return setup_pico(args, pre_trigger)
+
+
+def setup_husky(args, pre_trigger=0):
+    scope = HuskyScope(gain_db=args.gain_db, gain_mode=args.gain_mode,
+                       trigger_pin=args.trigger_pin, adc_freq=args.adc_freq,
+                       stream=args.stream, skip_ms=args.skip_ms)
+    scope.connect()
+    volt_div, time_div, sample_rate = scope.setChannel(args.sample_rate, args.samples, pre_trigger)
+    scope.setTriggerChannel(enable=1)
+
+    print("Scope settings:"
+          "\n\tgain: {:.1f} dB ({} mode), AC coupled MEASURE input"
+          "\n\tsampleRate: {:e}\n\ttimeDiv: {:e}"
+          "\n\twindow: {:.3f} ms ({:.3f} ms before the trigger, {:.3f} ms after)"
+          .format(args.gain_db, args.gain_mode, sample_rate, time_div,
+                  1e3 * args.samples / sample_rate, 1e3 * pre_trigger / sample_rate,
+                  1e3 * (args.samples - pre_trigger) / sample_rate))
+    if sample_rate != args.sample_rate:
+        print("[*] Requested {:.3f} MS/s, running at {:.3f} MS/s (the ADC clock has to be an "
+              "integer multiple of it)".format(args.sample_rate / 1e6, sample_rate / 1e6))
+    return scope, volt_div, time_div, "ADC full scale"
+
+
+def setup_pico(args, pre_trigger=0):
+    # picosdk is a separate install from chipwhisperer, so it is only pulled in when asked for.
+    from pico import PS3000A_EXTERNAL, pico3000
+
     scope = pico3000()
     scope.connect()
     volt_div, time_div, sample_rate = scope.setChannel(
@@ -245,7 +351,7 @@ def setup_scope(args, pre_trigger=0):
         scope.enableChannel(trigger_channel, rangeVolts=args.trigger_range)
 
     scope.setTriggerChannel(trigger_channel, enable=1, level=args.trigger_level)
-    return scope, volt_div, time_div
+    return scope, volt_div, time_div, "V"
 
 
 def setup_target(args):
@@ -294,8 +400,8 @@ def main():
     try:
         if not args.no_scope:
             check_disk_budget(args, args.samples)
-            scope, volt_div, time_div = setup_scope(args, pre_trigger)
-            writer = TraceWriter(args, args.samples, volt_div, time_div, pre_trigger)
+            scope, volt_div, time_div, label_y = setup_scope(args, pre_trigger)
+            writer = TraceWriter(args, args.samples, volt_div, time_div, pre_trigger, label_y)
 
         collected = 0
         failures = 0
@@ -331,12 +437,18 @@ def main():
                 # is invisible in the .trs file - say so on the first one rather than after 3000.
                 if not window_checked:
                     window_checked = True
-                    print(f"[*] Signature takes ~{sign_ms:.0f} ms, capture window is "
-                          f"{window_ms:.0f} ms")
+                    print(f"[*] Signature takes ~{sign_ms:.0f} ms (host measured, including "
+                          f"serial round-trip), capture window is {window_ms:.0f} ms")
                     if sign_ms > window_ms:
-                        print(f"[!] The window is shorter than a signature - traces will be "
-                              f"truncated. Raise --samples (>= {int(sign_ms * 1e-3 * args.sample_rate):,}) "
-                              f"or lower --sample-rate.")
+                        # Not necessarily a fault: on Husky a partial window is the default,
+                        # because dropping the tail is what buys decimate=1 and the resolution
+                        # that comes with it. Say what is captured and leave the call to the user.
+                        print(f"[*] So the window holds the first {window_ms:.0f} ms of it. To "
+                              f"cover the whole signature, raise --samples to "
+                              f">= {int(sign_ms * 1e-3 * args.sample_rate):,} - past Husky's "
+                              f"131,070 sample buffer that needs --stream (on by default, up to "
+                              f"{HUSKY_MAX_STREAM_RATE / 1e6:.0f} MS/s) or --no-stream with a "
+                              f"lower --sample-rate.")
 
                 if scope is not None:
                     samples, _raw = scope.getNativeSignalBytes()

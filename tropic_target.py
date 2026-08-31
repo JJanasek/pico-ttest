@@ -5,6 +5,7 @@
 # This replaces the ChipWhisperer target/programmer that the old pico3000.py used.
 import collections
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -12,8 +13,10 @@ import time
 import serial
 
 # Default location of the PlatformIO project holding tvla_target.cpp.
-DEFAULT_PROJECT_DIR = os.path.expanduser("/home/xjanasek/Documents/PlatformIO/Projects/Tropic test/")
+DEFAULT_PROJECT_DIR = os.path.expanduser("~/Documents/PlatformIO/Projects/Tropic test")
 DEFAULT_ENV = "esp32dev_tvla"
+# The ESP32's USB-serial bridge. Note that a plugged-in Husky also claims a /dev/ttyACM*, so
+# do not reach for the first ACM port you see - open() rejects it explicitly.
 DEFAULT_PORT = "/dev/ttyUSB0"
 DEFAULT_BAUD = 115200
 
@@ -62,7 +65,9 @@ class PlatformIOProject:
         if self.port and "upload" in targets:
             cmd += ["--upload-port", self.port]
 
-        print("[*] " + " ".join(cmd))
+        # shlex.join, not " ".join: the project path has a space in it, and the echoed command
+        # is there to be copy-pasted when a build needs re-running by hand.
+        print("[*] " + shlex.join(cmd))
         subprocess.run(cmd, check=True)
 
     def build(self):
@@ -92,11 +97,31 @@ class TropicTarget:
         self._recent = collections.deque(maxlen=8)
 
     # ------------------------------------------------------------------ lifecycle
+    def _reset_board(self):
+        """Pulses EN so the boot banner lands after we have started listening.
+
+        Opening the port already resets most ESP32 boards, but the banner - which carries the
+        firmware's '-ERR' when Tropic01.begin() fails - is emitted while the driver is still
+        settling and gets flushed. Losing it turns a one-line hardware fault into a silent
+        30 second timeout, so the reset is driven explicitly instead. DTR low keeps IO0 high,
+        which boots the application rather than the ROM bootloader.
+        """
+        try:
+            self.ser.setDTR(False)
+            self.ser.setRTS(True)   # EN low: hold in reset
+            time.sleep(0.1)
+            self.ser.reset_input_buffer()
+            self.ser.setRTS(False)  # release
+            time.sleep(0.05)
+        except (OSError, serial.SerialException):
+            # Not every USB-serial bridge exposes the auto-reset lines; the open() itself has
+            # usually reset the board anyway, so this is not worth failing over.
+            pass
+
     def open(self, ready_timeout=30.0):
         self.ser = serial.Serial(self.port, self.baud, timeout=0.5)
-        # Opening the port toggles DTR/RTS, which resets most ESP32 boards, so the firmware may
-        # still be booting (and its banner may have been flushed on open). Alternate between
-        # listening for '+READY' and pinging until one of them answers.
+        self._reset_board()
+        # Alternate between listening for '+READY' and pinging until one of them answers.
         deadline = time.time() + ready_timeout
         while time.time() < deadline:
             # A '-ERR' here means the firmware booted and reported a real failure (e.g. the secure
@@ -132,8 +157,14 @@ class TropicTarget:
         self.close()
 
     # ------------------------------------------------------------------- protocol
-    def _read_reply(self, timeout=None):
-        """Reads lines until a '+'/'-' reply arrives. Returns the reply without its prefix."""
+    def _read_reply(self, timeout=None, accept_ready=True):
+        """Reads lines until a '+'/'-' reply arrives. Returns the reply without its prefix.
+
+        '+READY' is the firmware's unsolicited boot banner, not an answer to anything. If the
+        board is still booting when a command goes out, that banner arrives first and would be
+        returned as the command's reply - keygen then tries to parse "READY" as a public key.
+        Commands therefore skip it; only open(), which is waiting for it, accepts it.
+        """
         deadline = time.time() + (self.timeout if timeout is None else timeout)
         while time.time() < deadline:
             line = self.ser.readline().decode("ascii", errors="replace").strip()
@@ -143,6 +174,10 @@ class TropicTarget:
             if line.startswith("#"):
                 if self.verbose:
                     print("    " + line)
+                continue
+            if not accept_ready and line.startswith("+") and line[1:].strip().startswith("READY"):
+                if self.verbose:
+                    print("    (late boot banner ignored: " + line + ")")
                 continue
             if line.startswith("-"):
                 raise TargetError(line)
@@ -158,7 +193,7 @@ class TropicTarget:
         self.ser.reset_input_buffer()
         self.ser.write((line + "\n").encode("ascii"))
         self.ser.flush()
-        return self._read_reply(timeout=timeout)
+        return self._read_reply(timeout=timeout, accept_ready=False)
 
     # ------------------------------------------------------------------- commands
     def ping(self):

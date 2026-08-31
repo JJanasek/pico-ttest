@@ -130,6 +130,11 @@ def parse_args():
                         "default: %(default)s). The "
                         "trigger GPIO's own edge couples into the measurement and clips the ADC; "
                         "skipping past it lets --gain-db be set for the signature instead")
+    p.add_argument("--sign-delay", type=float, default=0.0,
+                   help="pause this many ms after every signature. TROPIC01 has gone into alarm "
+                        "mode three times, each after a burst of back-to-back signatures, and "
+                        "--tiles multiplies that rate by the tile count. Spacing them out is the "
+                        "cheap thing to try before concluding the chip cannot sustain a campaign")
     p.add_argument("--tiles", type=int, default=1,
                    help="capture each trace as N consecutive windows and concatenate them "
                         "(Husky, default: 1 = off). Husky holds 131,070 samples however fast the "
@@ -460,6 +465,8 @@ def main():
                     tile_start = time.time()
                     target.sign(payload)
                     tile_ms = (time.time() - tile_start) * 1e3
+                    if args.sign_delay:
+                        time.sleep(args.sign_delay * 1e-3)
 
                     if scope is not None:
                         chunk, _raw = scope.getNativeSignalBytes()

@@ -35,6 +35,12 @@ MAX_CLKGEN_FREQ = 200e6
 # of at least several hundred traces.
 MAX_STREAM_RATE = 10e6
 
+# Sustainable block-mode rate for tiled runs. 200 MS/s produces the best data but leaves no FIFO
+# drain margin: it captured 231 consecutive windows cleanly, then wedged the datapath so hard that
+# only a physical replug cleared it. 100 MS/s ran 780 windows with zero retries. Prefer 100 MS/s
+# for anything campaign-length, and treat 200 MS/s as a short-run tool.
+MAX_SUSTAINED_BLOCK_RATE = 100e6
+
 # ADC clock used in block mode. Everything above the effective rate is thrown away by the
 # decimator without an anti-alias filter, so a lower ADC clock folds less noise into the band
 # that is kept - but it must stay a sane clock for the ADC. 20 MHz is a good compromise.

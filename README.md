@@ -221,6 +221,12 @@ concatenated trace is not identical to a continuous capture. Per-sample TVLA sta
 unaffected (each point is still fixed-vs-random across many traces); analysis that spans a tile
 boundary is not.
 
+**Rate matters for whether a tiled run survives.** 200 MS/s gives the best data but leaves no FIFO
+drain margin: measured here it captured 231 consecutive windows cleanly and then wedged the
+capture datapath, which only a physical replug cleared - reconnecting resets FPGA registers, not
+the datapath. 100 MS/s ran 780 windows with zero retries. Use 100 MS/s (39 tiles) for campaigns
+and keep 200 MS/s (77 tiles) for short runs.
+
 It costs one signature per tile per trace: 20.9 s per trace at 77 tiles, so ~35 min for 100 traces
 and ~11.6 h for 2000. It is also the hardest thing you can ask of the chip - see the alarm note
 below - and `--sign-delay` exists to pace it.

@@ -433,6 +433,8 @@ def main():
         # Counted separately from the total: the abort is about a run that has stopped making
         # progress, not about a long campaign that collected a few duds along the way.
         consecutive = 0
+        # Set while a rebuild has not yet been vindicated by a successful capture.
+        rebuilt = False
         sample_rate = scope.sampleRate if scope is not None else args.sample_rate
         window_ms = 1e3 * args.samples * args.tiles / sample_rate
         window_checked = False

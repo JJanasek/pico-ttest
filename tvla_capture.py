@@ -454,12 +454,15 @@ def main():
                 # Ed25519 derives its nonce from the message, so every repetition is the same
                 # computation - which is what makes the windows safe to concatenate.
                 tile_samples = []
+                phase = {"arm": 0.0, "sign": 0.0, "read": 0.0}
                 sign_start = time.time()
                 for tile in range(args.tiles):
                     if scope is not None:
+                        mark = time.time()
                         if args.tiles > 1:
                             scope.set_tile(tile)
                         scope.arm(preTrigger=pre_trigger)
+                        phase["arm"] += time.time() - mark
                         # The scope only honours the trigger once the pre-trigger samples have
                         # been collected. Send the command after that window has elapsed,
                         # otherwise the rising edge lands during the fill and is dropped - and
@@ -471,10 +474,13 @@ def main():
                     tile_start = time.time()
                     target.sign(payload)
                     tile_ms = (time.time() - tile_start) * 1e3
+                    phase["sign"] += tile_ms * 1e-3
 
                     if scope is not None:
+                        mark = time.time()
                         chunk, _raw = scope.getNativeSignalBytes()
                         tile_samples.append(chunk)
+                        phase["read"] += time.time() - mark
 
                     # Pace only once the capture has been read out. The ADC keeps sampling until
                     # capture() completes, so a sleep between the signature and the read leaves
@@ -498,6 +504,13 @@ def main():
                               f"{sample_rate/1e6:.0f} MS/s = {window_ms:.1f} ms covered, "
                               f"{args.tiles * args.samples:,} samples per trace "
                               f"({args.tiles} signatures, {total_ms/1e3:.1f} s per trace)")
+                        # Where the per-trace time actually goes. Signing is the floor - one
+                        # execution per tile - so only the arm and read shares are worth
+                        # attacking if a campaign is taking too long.
+                        print("[*] Per trace: {:.1f} s signing (the floor), {:.1f} s arming, "
+                              "{:.1f} s reading out - {:.0f} ms per tile outside the signature"
+                              .format(phase["sign"], phase["arm"], phase["read"],
+                                      1e3 * (phase["arm"] + phase["read"]) / args.tiles))
                     if sign_ms > window_ms:
                         # Not necessarily a fault: on Husky a partial window is the default,
                         # because dropping the tail is what buys decimate=1 and the resolution

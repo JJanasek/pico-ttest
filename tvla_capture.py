@@ -465,12 +465,17 @@ def main():
                     tile_start = time.time()
                     target.sign(payload)
                     tile_ms = (time.time() - tile_start) * 1e3
-                    if args.sign_delay:
-                        time.sleep(args.sign_delay * 1e-3)
 
                     if scope is not None:
                         chunk, _raw = scope.getNativeSignalBytes()
                         tile_samples.append(chunk)
+
+                    # Pace only once the capture has been read out. The ADC keeps sampling until
+                    # capture() completes, so a sleep between the signature and the read leaves
+                    # it filling a FIFO nobody is draining - at 200 MS/s that overflows within
+                    # milliseconds and corrupts every trace.
+                    if args.sign_delay:
+                        time.sleep(args.sign_delay * 1e-3)
                 # Per-signature duration, so the window check below compares like with like even
                 # when a trace is assembled from several of them.
                 sign_ms = tile_ms

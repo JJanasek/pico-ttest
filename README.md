@@ -195,6 +195,64 @@ scale is in volts depends on `--gain-db` and on the probe - so the `.trs` Y labe
 
 The two classes are interleaved at random per trace so slow drift affects both equally.
 
+### Getting bandwidth out of a 131,070 sample buffer
+
+Husky holds 131,070 samples however fast its ADC runs, so bandwidth and coverage trade directly
+against each other. A PicoScope's ~100 M sample captures have roughly 760x this depth; for a wide
+high-bandwidth survey a PicoScope is simply the right instrument (`--scope pico`).
+
+| what you want | how |
+| --- | --- |
+| full signature, moderate bandwidth | `--stream` (default), 10 MS/s, `--samples 1.05e6` = 105 ms |
+| a short window at full bandwidth | `--no-stream --sample-rate 200e6 --samples 131070` = 0.655 ms |
+| wide span AND full bandwidth | `--tiles N` |
+
+`--tiles N` captures each trace as N consecutive windows and concatenates them, stepping
+`adc.offset` by one window per tile. 77 tiles at 200 MS/s covers 50.5 ms at 10,092,390 samples per
+trace - 20x the bandwidth of the streaming default.
+
+Every tile signs the **same payload with the same key**: the key is generated once per run, and
+Ed25519 derives its nonce from the message, so the tiles are one deterministic computation seen
+through successive windows. This is why tiling lives inside a single invocation - separate runs
+would each `keygen()` and observe unrelated computations.
+
+The tiles are still separate physical executions, with independent noise and some jitter, so a
+concatenated trace is not identical to a continuous capture. Per-sample TVLA statistics are
+unaffected (each point is still fixed-vs-random across many traces); analysis that spans a tile
+boundary is not.
+
+It costs one signature per tile per trace: 20.9 s per trace at 77 tiles, so ~35 min for 100 traces
+and ~11.6 h for 2000. It is also the hardest thing you can ask of the chip - see the alarm note
+below - and `--sign-delay` exists to pace it.
+
+### Survey first, then zoom
+
+A 0.655 ms window at 200 MS/s is 0.65% of the signature: aimed at the right place it is the best
+data the Husky can produce, and aimed anywhere else it shows nothing, with no way to tell the two
+apart. So work in two stages:
+
+1. **Survey** - the whole signature, streamed, one continuous trace:
+
+   ```sh
+   python tvla_capture.py -n 2000 -c ed -m message --no-flash \
+       --gain-db 34 --sample-rate 10e6 --samples 1.05e6 --traces-per-file 500
+   ```
+
+   The measured spectrum is ~70% of signal power below 500 kHz and ~83% below 5 MHz - TROPIC01's
+   decoupling capacitor sits across the measured node and low-passes the current signature - so
+   10 MS/s already captures most of what is there. Coverage matters more than bandwidth for
+   *finding* leakage.
+
+2. **Zoom** - once the t-statistic exceeds +-4.5 somewhere, aim one full-bandwidth window at it:
+
+   ```sh
+   python tvla_capture.py -n 2000 -c ed -m message --no-flash \
+       --no-stream --sample-rate 200e6 --samples 131070 --skip-ms <where> --gain-db 28
+   ```
+
+Gain differs per rate: 200 MS/s captures more noise bandwidth, so 34 dB that suits 10 MS/s clips
+over 4% at 200 MS/s. Let the capture's own warnings set it.
+
 ### Target won't come up
 
 `tvla_capture.py` resets the board explicitly on connect so the firmware's boot banner - and any
@@ -214,6 +272,13 @@ python -c "from tropic_target import TropicTarget; TropicTarget(verbose=True).op
   detection and refuses to operate. **Only a full power cycle clears it** - an ESP32 EN reset is
   not enough, because the shield stays powered through it. Unplug the ESP32's USB, wait, plug it
   back in.
+
+  Alarms have followed bursts of rapid signing (a 100 trace run, ~800 signatures from a failed
+  tiled run), and `--tiles` multiplies the signature rate by the tile count, so it provokes this
+  more than anything else. `--sign-delay` paces the campaign. Note also that `default_setup()`
+  routes the clock generator to HS2 - pin 6 of the same header the trigger and ground wires use -
+  which put a square wave at the ADC clock frequency next to the target; `husky.py` disables it,
+  because nothing here clocks the target from the Husky.
 
   If it goes straight back into alarm, the measurement setup itself is tripping the detector.
   A shunt in the supply rail is the usual cause: shrink the resistor, add decoupling on the chip

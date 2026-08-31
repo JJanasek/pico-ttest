@@ -312,7 +312,11 @@ class HuskyScope():
             scope.adc.timeout = timeout
 
         try:
-            timed_out = scope.capture()
+            # poll_done=True asks Husky when the capture actually finished. The default instead
+            # sleeps for a computed (offset+samples)/adc_freq, and that estimate gets fragile as
+            # the offset grows - reading early shows up as 'slow FIFO underflow' with a
+            # 'fast FIFO overflow' behind it, which is what tiling was hitting.
+            timed_out = scope.capture(poll_done=True)
         except Exception as ex:
             # A desynced bulk read leaves the Husky unable to identify itself on the next
             # connect, and only a replug clears it - say so rather than letting the raw

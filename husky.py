@@ -118,13 +118,13 @@ class HuskyScope():
         # raises out of _dict_repr() before the setup is applied.
         self.scope.default_setup(verbose=False)
 
-        # default_setup() routes the clock generator to HS2, which is pin 6 of the same 20-pin
-        # header the trigger and ground wires are on - so the Husky drives a square wave at the
-        # ADC clock frequency straight into the target's breadboard. At 200 MS/s that is 200 MHz
-        # of aggressor next to a secure element that watches for exactly this kind of thing, and
-        # TROPIC01 dropped into alarm mode a trace into a 200 MS/s campaign. Nothing here clocks
-        # the target - the ESP32 runs off its own crystal - so the output is pure downside.
-        self.scope.io.hs2 = None
+        # NOTE: do not disable the HS2 clock output here. default_setup() routes clkgen to HS2
+        # (pin 6 of the 20-pin header), which does put a square wave at the ADC clock frequency
+        # next to the target, and switching it off looked like a free way to stop TROPIC01
+        # tripping into alarm mode. It is not free: with `scope.io.hs2 = None` a 200 MS/s capture
+        # fails on the very first window with 'slow FIFO underflow, fast FIFO overflow', at the
+        # same rate and offset that captures cleanly with HS2 left alone. Whatever the clock
+        # module does when that output is gated, the ADC does not survive it.
 
         if DEBUG_MODE:
             print("Connected to {} (serial {})".format(

@@ -425,8 +425,12 @@ def main():
         if not args.no_scope:
             check_disk_budget(args, args.samples * args.tiles)
             scope, volt_div, time_div, label_y = setup_scope(args, pre_trigger)
-            writer = TraceWriter(args, args.samples * args.tiles, volt_div, time_div,
-                                 pre_trigger, label_y)
+            # time_div describes one tile's window, but SCALE_X is derived as
+            # 10 * time_div / total_samples - the .trs convention being ten divisions across the
+            # whole trace. Scaling it by the tile count keeps seconds-per-sample at 1/rate;
+            # without it the time axis came out compressed by exactly --tiles.
+            writer = TraceWriter(args, args.samples * args.tiles, volt_div,
+                                 time_div * args.tiles, pre_trigger, label_y)
 
         collected = 0
         failures = 0

@@ -385,6 +385,12 @@ class HuskyScope():
                         1e3 * self.scope.adc.offset / self.sampleRate,
                         errors.strip().rstrip(",")))
 
+        # A short read would silently desync every later tile boundary in a concatenated trace,
+        # so check rather than trust it.
+        if out.size != self.n_points:
+            raise FifoError("expected {:,} samples, got {:,}"
+                            .format(self.n_points, out.size))
+
         self._report_errors(float(np.mean((out >= 127) | (out <= -128))))
         return out.astype(np.int8).tobytes(), raw
 

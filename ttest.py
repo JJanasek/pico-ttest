@@ -23,21 +23,39 @@ def parse_args():
     p.add_argument("--top", type=int, default=5, help="how many peaks to list (default: 5)")
     p.add_argument("--blocks", type=int, default=10,
                    help="how many equal time blocks to summarise (default: 10)")
+    p.add_argument("--decimate", type=int, default=1,
+                   help="low-pass by averaging N samples and keep every Nth, before the t-test. "
+                        "Running a set at --decimate 1 and again at --decimate 10 answers whether "
+                        "its bandwidth above the decimated Nyquist carries leakage - and because "
+                        "it is the SAME traces both times, trace alignment is identical and "
+                        "cannot bias the comparison the way comparing two acquisitions does")
     return p.parse_args()
 
 
-def welch(path):
+def decimate(samples, factor):
+    """Boxcar-averages `factor` samples and keeps one, as a crude anti-aliased downsample.
+
+    A boxcar is a poor filter, but it is the honest comparison here: it is what the leakage would
+    look like if the ADC had simply sampled slower, and it needs no SciPy.
+    """
+    if factor <= 1:
+        return samples
+    usable = (samples.size // factor) * factor
+    return samples[:usable].reshape(-1, factor).mean(axis=1)
+
+
+def welch(path, factor=1):
     """Streams one trace set and returns (t per sample, sample rate, class counts)."""
     with trsfile.open(path, "r") as ts:
         headers = ts.get_headers()
-        n_samples = headers[trsfile.Header.NUMBER_SAMPLES]
-        scale_x = headers[trsfile.Header.SCALE_X]
+        n_samples = headers[trsfile.Header.NUMBER_SAMPLES] // factor
+        scale_x = headers[trsfile.Header.SCALE_X] * factor
         counts = [0, 0]
         total = [np.zeros(n_samples), np.zeros(n_samples)]
         squares = [np.zeros(n_samples), np.zeros(n_samples)]
         for trace in ts:
             cls = int(trace.parameters["ttest"].value[0])
-            samples = np.asarray(trace.samples, dtype=np.float64)
+            samples = decimate(np.asarray(trace.samples, dtype=np.float64), factor)[:n_samples]
             counts[cls] += 1
             total[cls] += samples
             squares[cls] += samples * samples
@@ -92,7 +110,7 @@ def main():
     args = parse_args()
     results = []
     for path in args.paths:
-        t, rate, counts = welch(path)
+        t, rate, counts = welch(path, args.decimate)
         report(path, t, rate, counts, args)
         results.append((path, t, rate, sum(counts)))
 

@@ -10,11 +10,43 @@
 # out leaves the per-trace leakage strength, which is what says whether a change to the capture
 # (more bandwidth, a different probe) actually bought anything.
 import argparse
+import math
+
 import numpy as np
 import trsfile
 
-# The usual TVLA threshold: |t| above this is taken as evidence of class-dependent leakage.
-THRESHOLD = 4.5
+# The threshold TVLA is usually quoted with. It is derived for a SINGLE comparison, and using it
+# on a whole trace is the most common way to read leakage into noise: with a million samples,
+# values above it occur by chance in every run.
+CLASSIC_THRESHOLD = 4.5
+
+# Family-wise error rate the corrected threshold targets.
+ALPHA = 1e-5
+
+
+def corrected_threshold(n_samples, alpha=ALPHA):
+    """|t| a trace of n_samples must exceed before one point is evidence of leakage.
+
+    Every sample is its own hypothesis test, so the chance of at least one large |t| under the
+    null grows with the trace length - the classic 4.5 gets crossed by noise alone once traces
+    run to millions of points. This is the Bonferroni correction: solve the two-sided normal
+    tail for alpha/n_samples. It is conservative, because neighbouring samples are correlated
+    and the effective number of independent tests is smaller than the sample count.
+    """
+    target = alpha / n_samples
+    lo, hi = 0.0, 40.0
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        if math.erfc(mid / math.sqrt(2)) > target:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def null_expected_max(n_samples):
+    """Roughly the largest |t| a leak-free trace of this length produces anyway."""
+    return math.sqrt(2 * math.log(max(n_samples, 2)))
 
 
 def parse_args():
@@ -80,9 +112,21 @@ def report(path, t, rate, counts, args):
     print(f"{counts[0]} fixed / {counts[1]} random, {t.size:,} samples at {rate/1e6:.3f} MS/s "
           f"({t.size/rate*1e3:.1f} ms)")
 
-    over = np.abs(t) > THRESHOLD
-    print(f"max |t| = {np.abs(t).max():.2f} at {ms[int(np.argmax(np.abs(t)))]:.3f} ms   "
-          f"| over {THRESHOLD}: {int(over.sum()):,} samples ({100*over.mean():.3f}%)")
+    threshold = corrected_threshold(t.size)
+    expected = null_expected_max(t.size)
+    peak = np.abs(t).max()
+    over = np.abs(t) > threshold
+    print(f"max |t| = {peak:.2f} at {ms[int(np.argmax(np.abs(t)))]:.3f} ms")
+    print(f"threshold for {t.size:,} samples: {threshold:.2f}  "
+          f"(the classic {CLASSIC_THRESHOLD} is a single-test figure and is meaningless here)")
+    print(f"a leak-free trace this long peaks around |t| = {expected:.2f} by chance alone")
+    if peak > threshold:
+        print(f"-> {int(over.sum()):,} samples exceed the corrected threshold: real leakage")
+    elif peak > expected:
+        print(f"-> peak is above the chance level but below the threshold: suggestive, not "
+              f"conclusive - collect more traces")
+    else:
+        print(f"-> peak is at or below what noise alone produces: NO evidence of leakage")
     # Normalised so acquisitions of different sizes are comparable.
     print(f"t/sqrt(N) = {np.abs(t).max()/np.sqrt(n):.4f}  <- compare this between acquisitions")
 
@@ -102,7 +146,7 @@ def report(path, t, rate, counts, args):
     step = max(1, t.size // args.blocks)
     for k in range(0, t.size, step):
         seg = np.abs(t[k:k+step])
-        flag = "  <-- leak" if seg.max() > THRESHOLD else ""
+        flag = "  <-- leak" if seg.max() > threshold else ""
         print(f"   {ms[k]:8.2f} - {ms[min(k+step, t.size-1)]:8.2f} ms : {seg.max():7.2f}{flag}")
 
 

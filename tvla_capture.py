@@ -547,6 +547,19 @@ def main():
                 consecutive += 1
                 print(f"ERROR ({failures}): {ex}")
 
+                # ALARM is latched in TROPIC01's hardware and no serial command clears it -
+                # lt_reboot documents itself as a power-cycle equivalent yet still re-reports
+                # alarm afterwards (libtropic.c:573). Only dropping the chip's 3.3 V helps, so
+                # every retry is guaranteed to fail; a 5000 trace run burned 501 of them.
+                if "LT_L1_CHIP_ALARM_MODE" in str(ex):
+                    raise RuntimeError(
+                        "TROPIC01 latched ALARM mode and cannot recover in software. Power-cycle "
+                        "the chip - unplug the ESP32's USB so the shield's 3.3 V drops - then "
+                        "restart. Completed --traces-per-file parts are already closed and "
+                        "readable. If this keeps cutting long runs short, --sign-delay lowers the "
+                        "duty cycle, which is the cheap thing to try."
+                    ) from ex
+
                 # An overrun wedges the capture datapath, and a bare re-arm then fails forever -
                 # which is how one bad window turns into a whole run of identical errors. Rebuild
                 # the scope before retrying rather than hammering a dead device.

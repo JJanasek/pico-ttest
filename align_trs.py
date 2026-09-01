@@ -93,6 +93,8 @@ def main():
                 refs[t if args.tiles > 1 else 0] += samples[base + lo: base + hi]
         refs /= used
         print(f"[*] reference built from {used} traces")
+        dtype = np.int16 if headers[trsfile.Header.SAMPLE_CODING] is trsfile.SampleCoding.SHORT \
+            else np.int8
 
         out_headers = {k: v for k, v in headers.items() if k is not trsfile.Header.NUMBER_TRACES}
         out_headers[trsfile.Header.DESCRIPTION] = (
@@ -112,8 +114,11 @@ def main():
                     # Roll only within the tile: a tile is a separate execution, so spilling
                     # samples across a seam would mix two of them.
                     fixed[base:base + tile_len] = np.roll(samples[base:base + tile_len], shift)
+                # Round back into the input's own coding: forcing bytes would quietly throw
+                # away four bits of a 16 bit capture.
+                info = np.iinfo(dtype)
                 out.append(trsfile.Trace(trace.sample_coding,
-                                         np.clip(np.rint(fixed), -128, 127).astype(np.int8),
+                                         np.clip(np.rint(fixed), info.min, info.max).astype(dtype),
                                          parameters=trace.parameters))
                 if (i + 1) % 250 == 0:
                     print(f"    {i+1}/{count}")

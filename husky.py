@@ -93,7 +93,8 @@ class HuskyScope():
 
     def __init__(self, gain_db=DEFAULT_GAIN_DB, gain_mode="high",
                  trigger_pin=DEFAULT_TRIGGER_PIN, adc_freq=DEFAULT_ADC_FREQ,
-                 stream=True, skip_ms=DEFAULT_SKIP_MS, timeout=CAPTURE_TIMEOUT):
+                 stream=True, skip_ms=DEFAULT_SKIP_MS, sample_bits=16,
+                 timeout=CAPTURE_TIMEOUT):
         if trigger_pin not in TRIGGER_PINS:
             raise ValueError("trigger pin must be one of {}".format(", ".join(TRIGGER_PINS)))
         self.gain_db = gain_db
@@ -102,6 +103,9 @@ class HuskyScope():
         self.adc_freq = adc_freq
         self.stream = stream
         self.skip_ms = skip_ms
+        if sample_bits not in (8, 16):
+            raise ValueError("sample_bits must be 8 or 16")
+        self.sample_bits = sample_bits
         self.timeout = timeout
 
         self.scope = None
@@ -364,11 +368,14 @@ class HuskyScope():
                 "scope did not trigger within {:.1f}s (or returned short data)"
                 .format(scope.adc.timeout))
 
-        # get_last_trace() is scaled to [-0.5, 0.5]; the .trs BYTE coding is a signed byte, so
-        # this lands on the same [-128, 127] mapping pico.rawToBytes() produces.
+        # get_last_trace() is scaled to [-0.5, 0.5]. Husky's ADC is 12 bit, so storing signed
+        # bytes throws four of them away; SHORT keeps the lot and costs twice the disk. Either
+        # way the full ADC scale maps onto the full coding range, which is what SCALE_Y assumes.
         trace = scope.get_last_trace()
         raw = scope.get_last_trace(as_int=True)
-        out = np.clip(np.rint(np.asarray(trace, dtype=np.float32) * 255.0), -128, 127)
+        scaled = np.asarray(trace, dtype=np.float32) * (65535.0 if self.sample_bits == 16 else 255.0)
+        limit = 32767 if self.sample_bits == 16 else 127
+        out = np.clip(np.rint(scaled), -limit - 1, limit)
         # A FIFO over/underflow means the stream could not keep up and samples were dropped or
         # duplicated. The data still has the right length and looks plausible - corrupted samples
         # mostly show up as extreme values, which reads as "clipping" - so nothing downstream
@@ -391,8 +398,9 @@ class HuskyScope():
             raise FifoError("expected {:,} samples, got {:,}"
                             .format(self.n_points, out.size))
 
-        self._report_errors(float(np.mean((out >= 127) | (out <= -128))))
-        return out.astype(np.int8).tobytes(), raw
+        self._report_errors(float(np.mean((out >= limit) | (out <= -limit - 1))))
+        dtype = np.int16 if self.sample_bits == 16 else np.int8
+        return out.astype(dtype).tobytes(), raw
 
     def _report_errors(self, clipped_fraction):
         """Reports gain problems once each.

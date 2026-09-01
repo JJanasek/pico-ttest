@@ -131,6 +131,11 @@ def parse_args():
                         "default: %(default)s). The "
                         "trigger GPIO's own edge couples into the measurement and clips the ADC; "
                         "skipping past it lets --gain-db be set for the signature instead")
+    p.add_argument("--sample-bits", type=int, default=16, choices=(8, 16),
+                   help="bits per stored sample (Husky, default: %(default)s). Husky's ADC is "
+                        "12 bit, so 8 discards four of them; 16 keeps the lot at twice the disk. "
+                        "It matters most at low gain, where the signal uses little of the ADC "
+                        "range and quantisation starts to show")
     p.add_argument("--sign-delay", type=float, default=0.0,
                    help="pause this many ms after every signature. TROPIC01 has gone into alarm "
                         "mode three times, each after a burst of back-to-back signatures, and "
@@ -179,6 +184,8 @@ def parse_args():
 
     if args.tiles < 1:
         p.error("--tiles must be at least 1")
+    if args.sample_bits == 16 and args.scope != "husky":
+        p.error("--sample-bits 16 is Husky only; the PicoScope path returns signed bytes")
     if args.tiles > 1:
         if args.scope != "husky":
             p.error("--tiles is a Husky-only workaround for its 131,070 sample buffer")
@@ -210,8 +217,8 @@ def preTriggerSamples(spec, n_samples):
 
 
 def check_disk_budget(args, n_samples):
-    """Traces are one byte per sample, so a long window times many traces adds up fast."""
-    projected = n_samples * args.traces
+    """A long window times many traces adds up fast, doubly so at 16 bits per sample."""
+    projected = n_samples * args.traces * (2 if getattr(args, "sample_bits", 8) == 16 else 1)
     free = shutil.disk_usage(os.path.abspath(args.outdir) if os.path.isdir(args.outdir)
                              else os.path.dirname(os.path.abspath(args.outdir)) or ".").free
     gib = 1024 ** 3
@@ -242,10 +249,15 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, label_y=
                             args.trigger_pin))
         if args.tiles > 1:
             settings += " tiles={}x{}".format(args.tiles, args.samples)
+        settings += " {}bit".format(args.sample_bits)
     else:
         settings = ("pico ch{} {:.4g}V/div {} {:.3f}MS/s x{} samples"
                     .format(args.channel, args.volt_div, args.coupling,
                             args.sample_rate / 1e6, args.samples))
+
+    coding = (trsfile.SampleCoding.SHORT if getattr(args, "sample_bits", 8) == 16
+              else trsfile.SampleCoding.BYTE)
+    full_scale = 32767 if coding is trsfile.SampleCoding.SHORT else 255
 
     headers = {
         trsfile.Header.TRS_VERSION: 2,
@@ -256,11 +268,11 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, label_y=
             f"pre_trigger={int(pre_trigger)} samples; {settings}",
         trsfile.Header.NUMBER_SAMPLES: int(n_samples),
         trsfile.Header.LENGTH_DATA: 1,
-        trsfile.Header.SAMPLE_CODING: trsfile.SampleCoding.BYTE,
+        trsfile.Header.SAMPLE_CODING: coding,
         trsfile.Header.LABEL_X: "s",
         trsfile.Header.LABEL_Y: label_y,
         trsfile.Header.SCALE_X: 10 * time_div / n_samples,
-        trsfile.Header.SCALE_Y: 10 * volt_div / np.iinfo(np.uint8).max,
+        trsfile.Header.SCALE_Y: 10 * volt_div / full_scale,
         trsfile.Header.TRACE_PARAMETER_DEFINITIONS: trsfile.parametermap.TraceParameterDefinitionMap(
             {"ttest": trsfile.traceparameter.TraceParameterDefinition(
                 trsfile.traceparameter.ParameterType.BYTE, 1, 0)}
@@ -330,7 +342,8 @@ def setup_scope(args, pre_trigger=0):
 def setup_husky(args, pre_trigger=0):
     scope = HuskyScope(gain_db=args.gain_db, gain_mode=args.gain_mode,
                        trigger_pin=args.trigger_pin, adc_freq=args.adc_freq,
-                       stream=args.stream, skip_ms=args.skip_ms)
+                       stream=args.stream, skip_ms=args.skip_ms,
+                       sample_bits=args.sample_bits)
     scope.connect()
     volt_div, time_div, sample_rate = scope.setChannel(args.sample_rate, args.samples, pre_trigger)
     scope.setTriggerChannel(enable=1)
@@ -529,7 +542,8 @@ def main():
                 if scope is not None:
                     samples = b"".join(tile_samples)
                     writer.append(trsfile.Trace(
-                        trsfile.SampleCoding.BYTE,
+                        trsfile.SampleCoding.SHORT if args.sample_bits == 16
+                        else trsfile.SampleCoding.BYTE,
                         samples,
                         trsfile.parametermap.TraceParameterMap(
                             {"ttest": trsfile.parametermap.ByteArrayParameter([trace_class])}

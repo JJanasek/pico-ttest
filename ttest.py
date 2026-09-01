@@ -55,6 +55,13 @@ def parse_args():
     p.add_argument("--top", type=int, default=5, help="how many peaks to list (default: 5)")
     p.add_argument("--blocks", type=int, default=10,
                    help="how many equal time blocks to summarise (default: 10)")
+    p.add_argument("--spectrum", action="store_true",
+                   help="report how signal power is distributed in frequency instead of running "
+                        "the t-test. Answers in seconds, from a handful of traces, whether the "
+                        "measurement chain passes the band the leakage lives in - a t-test needs "
+                        "thousands of traces to tell you the same thing")
+    p.add_argument("--rate", type=float, default=None,
+                   help="sample rate in S/s, for sets whose header has no SCALE_X")
     p.add_argument("--decimate", type=int, default=1,
                    help="low-pass by averaging N samples and keep every Nth, before the t-test. "
                         "Running a set at --decimate 1 and again at --decimate 10 answers whether "
@@ -150,11 +157,57 @@ def report(path, t, rate, counts, args):
         print(f"   {ms[k]:8.2f} - {ms[min(k+step, t.size-1)]:8.2f} ms : {seg.max():7.2f}{flag}")
 
 
+def spectrum(path, rate, traces=20):
+    """Where the signal's power sits in frequency, averaged over a few traces.
+
+    The band that matters is set by the target, not the scope: a 100 ms asymmetric operation
+    leaks in its envelope, far below the MHz range a fast-target rig is built for. If the chain
+    does not pass that band, no amount of gain, bandwidth or averaging recovers it.
+    """
+    with trsfile.open(path, "r") as ts:
+        if rate is None:
+            scale_x = ts.get_headers().get(trsfile.Header.SCALE_X)
+            if not scale_x:
+                raise SystemExit(f"{path} has no SCALE_X; pass --rate")
+            rate = 1.0 / scale_x
+        n = min(traces, len(ts))
+        power = None
+        for i in range(n):
+            a = np.asarray(ts[i].samples, dtype=np.float64)
+            a = a - a.mean()
+            p = np.abs(np.fft.rfft(a)) ** 2
+            power = p if power is None else power + p
+    freq = np.fft.rfftfreq(a.size, 1.0 / rate)
+    total = power.sum()
+    print(f"\n=== {path.split('/')[-1]} — spectrum ===")
+    print(f"{n} traces, {a.size:,} samples at {rate/1e6:.3f} MS/s")
+    edges = [0, 1e3, 10e3, 100e3, 500e3, 2e6, 10e6, rate / 2]
+    print(f"{'band':>22} {'share of power':>16}")
+    for lo, hi in zip(edges, edges[1:]):
+        if lo >= rate / 2:
+            break
+        m = (freq >= lo) & (freq < min(hi, rate / 2))
+        share = 100 * power[m].sum() / total
+        bar = "#" * int(share / 2)
+        print(f"{lo/1e3:>9.0f}-{min(hi, rate/2)/1e3:<8.0f} kHz {share:>10.2f}%  {bar}")
+    below = 100 * power[freq < 10e3].sum() / total
+    print(f"\nbelow 10 kHz: {below:.2f}%")
+    print("  A working PicoScope measurement of this target had 91%; a passive probe into the")
+    print("  Husky's ~1k input had 11%, and its t-test found nothing. Under ~50% here means the")
+    print("  chain is high-passing away the band the leakage is in.")
+
+
 def main():
     args = parse_args()
+    if args.spectrum:
+        for path in args.paths:
+            spectrum(path, args.rate)
+        return
     results = []
     for path in args.paths:
         t, rate, counts = welch(path, args.decimate)
+        if args.rate:
+            rate = args.rate / args.decimate
         report(path, t, rate, counts, args)
         results.append((path, t, rate, sum(counts)))
 

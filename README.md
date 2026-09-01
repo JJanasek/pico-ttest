@@ -259,6 +259,62 @@ apart. So work in two stages:
 Gain differs per rate: 200 MS/s captures more noise bandwidth, so 34 dB that suits 10 MS/s clips
 over 4% at 200 MS/s. Let the capture's own warnings set it.
 
+### The measurement chain has to pass the band the leakage is in
+
+Measured on this target with a PicoScope and with a Husky, same probe, same point on the board:
+
+| | PicoScope (1 M input) | Husky (passive probe into ~1k) |
+| --- | --- | --- |
+| power below 10 kHz | **91%** | **11%** |
+| max abs(t), 2000 traces | **8.25** | 4.53 (below the chance level) |
+
+Both instruments record a coherent, repeatable signal - the Husky's averaged trace sits 13x above
+its noise floor - but the two mean traces do not correlate at all (r = -0.02 over the same time
+window at the same rate). They are measuring the same point and seeing different things.
+
+The reason is the band. Filtering the *PicoScope* traces to imitate the Husky's response destroys
+the leak:
+
+| filter applied to the working PicoScope set | max abs(t) |
+| --- | --- |
+| none | **8.25** |
+| high-pass 10 kHz | 5.41 |
+| high-pass 30 kHz | 4.82 |
+| high-pass 100 kHz | 5.42 |
+
+(threshold 6.73 for this trace length). So the leakage lives **below ~10 kHz**, and anything that
+high-passes it away is fatal - which is exactly where the Husky measurement landed.
+
+Sample rate is not the issue and never was: the same PicoScope set decimated to 10 MS/s still
+gives t = 8.02. A 100 ms asymmetric operation leaks in its envelope, four orders of magnitude
+below the MHz range a fast-target rig is built around.
+
+**Likely cause: probe/input impedance mismatch.** Husky's LNA is an AD8330 with a ~1k input.
+A passive probe designed for a 1 M scope input forms a frequency-dependent divider into that -
+heavily attenuated at low frequency, much less so higher up, i.e. a high-pass. Husky's own AC
+coupling (~100 nF into 1k) corners near 1.6 kHz and does not explain suppression still visible at
+10 kHz, so the probe is the more likely culprit.
+
+Things to try, cheapest first:
+
+1. **Drop the passive probe.** Connect the shunt straight to MEASURE over coax. The shunt is a
+   low-impedance source, so no divider forms.
+2. **Check the spectrum, not the t-test** - it answers in seconds from ~20 traces:
+
+   ```sh
+   python ttest.py --spectrum traces/<set>.trs
+   ```
+
+   Under ~50% of power below 10 kHz means the chain is still high-passing the leakage away.
+3. **A DC-coupled buffer**: >=1 M input, <=50 ohm output, DC to a few MHz, gain 1-20x. What is
+   missing is impedance conversion and low-frequency response, not gain - Husky's own LNA already
+   offers up to 55 dB. An active oscilloscope probe is exactly this function; for a shunt, an
+   instrumentation amplifier (AD8429, AD8428, INA828) is better still because it also rejects the
+   supply common mode.
+
+   Not the CW502: NewAE recommend it, but it is a BGA2801 RF part specified to 2 GHz and does
+   nothing below 100 kHz.
+
 ### Target won't come up
 
 `tvla_capture.py` resets the board explicitly on connect so the firmware's boot banner - and any

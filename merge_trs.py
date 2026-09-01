@@ -42,10 +42,25 @@ def main():
     # Read every part's headers first, so an incompatible set fails before anything is written.
     headers = None
     total = 0
-    for path in args.parts:
-        with trsfile.open(path, "r") as ts:
-            part_headers = dict(ts.get_headers())
-            count = len(ts)
+    parts = list(args.parts)
+    for path in list(parts):
+        try:
+            with trsfile.open(path, "r") as ts:
+                part_headers = dict(ts.get_headers())
+                count = len(ts)
+        except Exception as ex:  # noqa: BLE001 - trsfile reports a truncated file several ways
+            # A .trs only becomes readable when it is closed, so the last part of a campaign that
+            # is still running - or was interrupted - fails to open. That is the normal case when
+            # merging partway through, and dropping it costs nothing. An unreadable part anywhere
+            # else means real data loss, and silently skipping it would leave a set with a hole.
+            if path == parts[-1]:
+                print(f"[!] {path} is not readable ({ex}) - skipping it. That is expected while "
+                      f"the campaign is still writing this part.")
+                parts.remove(path)
+                continue
+            raise SystemExit(
+                f"{path} is not readable ({ex}), and it is not the final part - merging would "
+                f"silently drop traces from the middle of the set. Fix or exclude it explicitly.")
         if headers is None:
             headers = part_headers
         else:
@@ -62,11 +77,11 @@ def main():
     headers = {k: v for k, v in headers.items() if k is not trsfile.Header.NUMBER_TRACES}
     description = headers.get(trsfile.Header.DESCRIPTION, "")
     headers[trsfile.Header.DESCRIPTION] = (
-        f"{description}; merged from {len(args.parts)} parts").lstrip("; ")
+        f"{description}; merged from {len(parts)} parts").lstrip("; ")
 
     written = 0
     with trsfile.trs_open(args.output, mode="w", headers=headers) as out:
-        for path in args.parts:
+        for path in parts:
             with trsfile.open(path, "r") as ts:
                 for trace in ts:
                     # Trace carries its own parameters (the 'ttest' class byte), so re-wrapping

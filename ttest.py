@@ -55,6 +55,11 @@ def parse_args():
     p.add_argument("--top", type=int, default=5, help="how many peaks to list (default: 5)")
     p.add_argument("--blocks", type=int, default=10,
                    help="how many equal time blocks to summarise (default: 10)")
+    p.add_argument("--growth", action="store_true",
+                   help="report max abs(t) over growing subsets of the set. Real leakage grows as "
+                        "sqrt(N); the largest value a leak-free trace produces by chance does not "
+                        "grow with trace count at all. A peak that sits still as traces are added "
+                        "is noise, however large it looks")
     p.add_argument("--spectrum", action="store_true",
                    help="report how signal power is distributed in frequency instead of running "
                         "the t-test. Answers in seconds, from a handful of traces, whether the "
@@ -197,8 +202,55 @@ def spectrum(path, rate, traces=20):
     print("  chain is high-passing away the band the leakage is in.")
 
 
+def growth(path, steps=6):
+    """max abs(t) as traces accumulate, against what signal and noise would each do."""
+    with trsfile.open(path, "r") as ts:
+        n_samples = ts.get_headers()[trsfile.Header.NUMBER_SAMPLES]
+        total = len(ts)
+        marks = [max(2, int(total * (i + 1) / steps)) for i in range(steps)]
+        counts = [0, 0]
+        acc = [np.zeros(n_samples), np.zeros(n_samples)]
+        sq = [np.zeros(n_samples), np.zeros(n_samples)]
+        rows = []
+        for i, trace in enumerate(ts):
+            cls = int(trace.parameters["ttest"].value[0]) if "ttest" in trace.parameters \
+                else int(trace.parameters["LEGACY_DATA"].value[0])
+            a = np.asarray(trace.samples, dtype=np.float64)
+            counts[cls] += 1
+            acc[cls] += a
+            sq[cls] += a * a
+            if (i + 1) in marks and min(counts) > 1:
+                mean = [acc[c] / counts[c] for c in (0, 1)]
+                var = [(sq[c] / counts[c] - mean[c] ** 2) * counts[c] / (counts[c] - 1)
+                       for c in (0, 1)]
+                t = (mean[0] - mean[1]) / np.sqrt(var[0] / counts[0] + var[1] / counts[1] + 1e-30)
+                rows.append((i + 1, float(np.abs(t).max()), tuple(counts)))
+
+    chance = null_expected_max(n_samples)
+    print(f"\n=== {path.split('/')[-1]} — growth ===")
+    print(f"{n_samples:,} samples; chance level {chance:.2f}, "
+          f"threshold {corrected_threshold(n_samples):.2f}")
+    print(f"{'traces':>8} {'fixed/random':>14} {'max|t|':>8} {'if signal':>11} {'if noise':>9}")
+    n0, t0, _ = rows[0]
+    for n, t, c in rows:
+        print(f"{n:>8,} {c[0]:>6,}/{c[1]:<7,} {t:>8.2f} {t0*math.sqrt(n/n0):>11.2f} "
+              f"{chance:>9.2f}")
+    grew = rows[-1][1] / (t0 * math.sqrt(rows[-1][0] / n0))
+    print(f"\ngrowth is {100*grew:.0f}% of what real leakage would show.")
+    if grew > 0.7:
+        print("  -> tracks sqrt(N): consistent with real leakage")
+    elif rows[-1][1] < chance * 1.2:
+        print("  -> flat and at the chance level: this is noise, more traces will not help")
+    else:
+        print("  -> grows, but slower than sqrt(N): check for a class-dependent artefact")
+
+
 def main():
     args = parse_args()
+    if args.growth:
+        for path in args.paths:
+            growth(path)
+        return
     if args.spectrum:
         for path in args.paths:
             spectrum(path, args.rate)

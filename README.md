@@ -14,7 +14,8 @@ still there under `--scope pico`.
 | [pico.py](pico.py) | PicoScope block-mode wrappers (`pico3000` / `pico5000` / `pico6000`) |
 | [trigger_check.py](trigger_check.py) | diagnostic: reports what the trigger input sees during one signature |
 | [pico3000.py](pico3000.py) | old ChipWhisperer + STM32 script, kept for reference only |
-| `~/Documents/PlatformIO/Projects/Tropic test/src/tvla_target.cpp` | capture firmware (env `esp32dev_tvla`) |
+| [firmware/src/tvla_target.cpp](firmware/src/tvla_target.cpp) | capture firmware (env `esp32dev_tvla`) |
+| [firmware/](firmware/) | self-contained PlatformIO project that builds the firmware |
 
 ## Hardware setup
 
@@ -132,7 +133,7 @@ The PlatformIO project now has two environments:
 To do it by hand:
 
 ```sh
-pio run -d "~/Documents/PlatformIO/Projects/Tropic test" -e esp32dev_tvla -t upload
+pio run -d firmware -e esp32dev_tvla -t upload
 ```
 
 ### Serial protocol (`tvla_target.cpp`)
@@ -386,7 +387,7 @@ Delete the generated build directories - not the whole `.pio`, so the downloaded
 survive - and let them regenerate:
 
 ```sh
-cd "~/Documents/PlatformIO/Projects/Tropic test"
+cd firmware
 find .pio/libdeps -maxdepth 3 -type d \( -name libtropic_build -o -name hal_cal_vars_build \) -exec rm -rf {} +
 ```
 

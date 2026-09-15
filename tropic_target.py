@@ -12,8 +12,12 @@ import time
 
 import serial
 
-# Default location of the PlatformIO project holding tvla_target.cpp.
-DEFAULT_PROJECT_DIR = os.path.expanduser("~/Documents/PlatformIO/Projects/Tropic test")
+# The PlatformIO project holding tvla_target.cpp. The in-repo `firmware/` builds it standalone,
+# so a fresh clone works out of the box; override with --project-dir to build from an external
+# project (e.g. one that also has the standalone esp32dev demo).
+_REPO_FIRMWARE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firmware")
+_EXTERNAL = os.path.expanduser("~/Documents/PlatformIO/Projects/Tropic test")
+DEFAULT_PROJECT_DIR = _REPO_FIRMWARE if os.path.isdir(_REPO_FIRMWARE) else _EXTERNAL
 DEFAULT_ENV = "esp32dev_tvla"
 # The ESP32's USB-serial bridge. Note that a plugged-in Husky also claims a /dev/ttyACM*, so
 # do not reach for the first ACM port you see - open() rejects it explicitly.

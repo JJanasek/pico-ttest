@@ -232,7 +232,77 @@ def check_disk_budget(args, n_samples):
         print("[!] That is over 80% of the free space on this filesystem.")
 
 
-def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, label_y="V", path=None):
+def git_commit():
+    """Short hash of the capture code, so a trace set can be tied back to how it was made."""
+    try:
+        import subprocess
+        out = subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+                              "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        rev = out.stdout.strip()
+        dirty = subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+                                "status", "--porcelain"], capture_output=True, text=True, timeout=5)
+        return (rev + ("-dirty" if dirty.stdout.strip() else "")) if rev else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def trace_set_params(args, n_samples, pre_trigger, meta):
+    """Campaign-level metadata: everything that is the same for every trace in the set.
+
+    Stored as typed TRACE_SET_PARAMETERS rather than crammed into the description string, so an
+    analysis script can read the public key, sample rate or gain back as real values. The message
+    (and, in scalar mode, the per-trace key) vary per trace and go in each Trace instead.
+    """
+    from trsfile.parametermap import TraceSetParameterMap
+    from trsfile.traceparameter import StringParameter, ByteArrayParameter, DoubleArrayParameter, IntegerArrayParameter
+
+    def s(v): return StringParameter(str(v))
+    def b(v): return ByteArrayParameter(list(v))
+    def d(v): return DoubleArrayParameter([float(v)])
+    def i(v): return IntegerArrayParameter([int(v)])
+
+    p = TraceSetParameterMap()
+    p["target"] = s("TROPIC01")
+    p["curve"] = s(CURVE_NAMES[args.curve])
+    p["mode"] = s(args.mode)
+    p["scope"] = s(args.scope)
+    p["sample_rate_Sps"] = d(meta.get("sample_rate", args.sample_rate))
+    p["samples_per_tile"] = i(args.samples)
+    p["tiles"] = i(args.tiles)
+    p["total_samples"] = i(n_samples)
+    p["pre_trigger_samples"] = i(pre_trigger)
+    p["fixed_payload"] = b(FIXED_PAYLOAD)
+
+    if args.mode == "message" and meta.get("pubkey") is not None:
+        p["public_key"] = b(meta["pubkey"])
+    if args.mode == "scalar":
+        p["fixed_scalar"] = b(FIXED_SCALAR)
+
+    if args.scope == "husky":
+        p["gain_dB"] = d(args.gain_db)
+        p["gain_mode"] = s(args.gain_mode)
+        p["skip_ms"] = d(args.skip_ms)
+        p["stream"] = s("stream" if args.stream else "block")
+        p["adc_clock_Sps"] = d(args.adc_freq)
+        p["sample_bits"] = i(args.sample_bits)
+        p["trigger"] = s(args.trigger_pin)
+    else:
+        p["channel"] = i(args.channel)
+        p["volt_per_div"] = d(args.volt_div)
+        p["coupling"] = s(args.coupling)
+        p["trigger"] = s(str(args.trigger_source))
+        p["trigger_level_V"] = d(args.trigger_level)
+
+    p["firmware"] = s(meta.get("fw_version", "unknown"))
+    p["capture_git"] = s(meta.get("git", "unknown"))
+    p["created_utc"] = s(meta.get("created", ""))
+    p["command"] = s(meta.get("command", ""))
+    return p
+
+
+def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, label_y="V",
+                    meta=None, path=None):
     os.makedirs(args.outdir, exist_ok=True)
     if path is None:
         stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
@@ -267,18 +337,44 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, label_y=
             f"TROPIC01 {CURVE_NAMES[args.curve]} fixed-vs-random {args.mode} TVLA; "
             f"pre_trigger={int(pre_trigger)} samples; {settings}",
         trsfile.Header.NUMBER_SAMPLES: int(n_samples),
-        trsfile.Header.LENGTH_DATA: 1,
+        trsfile.Header.LENGTH_DATA: 1 + PAYLOAD_LEN + (PRIVKEY_LEN if args.mode == "scalar" else 0),
         trsfile.Header.SAMPLE_CODING: coding,
         trsfile.Header.LABEL_X: "s",
         trsfile.Header.LABEL_Y: label_y,
         trsfile.Header.SCALE_X: 10 * time_div / n_samples,
         trsfile.Header.SCALE_Y: 10 * volt_div / full_scale,
-        trsfile.Header.TRACE_PARAMETER_DEFINITIONS: trsfile.parametermap.TraceParameterDefinitionMap(
-            {"ttest": trsfile.traceparameter.TraceParameterDefinition(
-                trsfile.traceparameter.ParameterType.BYTE, 1, 0)}
-        ),
+        trsfile.Header.TRACE_PARAMETER_DEFINITIONS: _trace_param_defs(args),
     }
+    if meta is not None:
+        headers[trsfile.Header.TRACE_SET_PARAMETERS] = trace_set_params(
+            args, n_samples, pre_trigger, meta)
     return path, trsfile.trs_open(path, mode="w", headers=headers)
+
+
+def _trace_param_defs(args):
+    """Per-trace fields: the class byte, the message signed, and (scalar mode) the key written.
+
+    Storing the message per trace is what turns a t-test-only set into one a real analysis can
+    use - without it there is no record of what was actually signed.
+    """
+    Def = trsfile.traceparameter.TraceParameterDefinition
+    T = trsfile.traceparameter.ParameterType
+    offset = 0
+    defs = {}
+    defs["ttest"] = Def(T.BYTE, 1, offset); offset += 1
+    defs["msg"] = Def(T.BYTE, PAYLOAD_LEN, offset); offset += PAYLOAD_LEN
+    if args.mode == "scalar":
+        defs["key"] = Def(T.BYTE, PRIVKEY_LEN, offset); offset += PRIVKEY_LEN
+    return trsfile.parametermap.TraceParameterDefinitionMap(defs)
+
+
+def _trace_params(args, trace_class, payload, key):
+    """The per-trace values matching _trace_param_defs: class, message, and (scalar) key."""
+    Byte = trsfile.parametermap.ByteArrayParameter
+    params = {"ttest": Byte([int(trace_class)]), "msg": Byte(list(payload))}
+    if args.mode == "scalar":
+        params["key"] = Byte(list(key if key is not None else FIXED_SCALAR))
+    return trsfile.parametermap.TraceParameterMap(params)
 
 
 class TraceWriter:
@@ -289,8 +385,10 @@ class TraceWriter:
     runs for hours, rolling to a new file every N traces keeps everything collected so far safe.
     """
 
-    def __init__(self, args, n_samples, volt_div, time_div, pre_trigger=0, label_y="V"):
+    def __init__(self, args, n_samples, volt_div, time_div, pre_trigger=0, label_y="V",
+                 meta=None):
         self._args = args
+        self._meta = meta
         self._header_args = (n_samples, volt_div, time_div, pre_trigger, label_y)
         self._per_file = args.traces_per_file
         self._stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
@@ -309,7 +407,8 @@ class TraceWriter:
     def _roll(self):
         self.close()
         path = self._path()
-        _, self._file = open_trace_file(self._args, *self._header_args, path=path)
+        _, self._file = open_trace_file(self._args, *self._header_args,
+                                        meta=self._meta, path=path)
         self.paths.append(path)
         self._index += 1
         self._in_file = 0
@@ -396,8 +495,10 @@ def setup_target(args):
         PlatformIOProject(args.project_dir, args.env, args.port).upload()
 
     target = TropicTarget(args.port, args.baud, verbose=args.verbose).open()
-    print("[*] Target version: " + target.version())
+    fw_version = target.version()
+    print("[*] Target version: " + fw_version)
 
+    pubkey = None
     if args.mode == "message":
         # One key for the whole campaign; only the message varies.
         pubkey = target.keygen(args.curve)
@@ -407,7 +508,7 @@ def setup_target(args):
         # slot shows up before the campaign rather than 2000 traces in.
         target.store_key(args.curve, FIXED_SCALAR)
         print(f"[*] Stored the fixed {CURVE_NAMES[args.curve]} scalar (rewritten per trace)")
-    return target
+    return target, pubkey, fw_version
 
 
 def prepare_trial(args, target, trace_class):
@@ -417,11 +518,12 @@ def prepare_trial(args, target, trace_class):
     inside the trigger window.
     """
     if args.mode == "message":
-        return FIXED_PAYLOAD if trace_class == CLASS_FIXED else os.urandom(PAYLOAD_LEN)
+        payload = FIXED_PAYLOAD if trace_class == CLASS_FIXED else os.urandom(PAYLOAD_LEN)
+        return payload, None
 
     key = FIXED_SCALAR if trace_class == CLASS_FIXED else os.urandom(PRIVKEY_LEN)
     target.store_key(args.curve, key)
-    return FIXED_PAYLOAD
+    return FIXED_PAYLOAD, key
 
 
 def main():
@@ -433,7 +535,17 @@ def main():
     # Resolved before anything is opened, so a bad value fails immediately.
     pre_trigger = preTriggerSamples(args.pre_trigger, args.samples)
 
-    target = setup_target(args)
+    import datetime, shlex, sys as _sys
+    target, pubkey, fw_version = setup_target(args)
+    meta = {
+        "pubkey": pubkey,
+        "fw_version": fw_version,
+        "git": git_commit(),
+        "created": datetime.datetime.now(datetime.timezone.utc)
+                       .strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "command": shlex.join(_sys.argv),
+        "sample_rate": args.sample_rate,
+    }
     try:
         if not args.no_scope:
             check_disk_budget(args, args.samples * args.tiles)
@@ -443,7 +555,7 @@ def main():
             # whole trace. Scaling it by the tile count keeps seconds-per-sample at 1/rate;
             # without it the time axis came out compressed by exactly --tiles.
             writer = TraceWriter(args, args.samples * args.tiles, volt_div,
-                                 time_div * args.tiles, pre_trigger, label_y)
+                                 time_div * args.tiles, pre_trigger, label_y, meta=meta)
 
         collected = 0
         failures = 0
@@ -465,7 +577,7 @@ def main():
             try:
                 # Randomly interleave the two classes so slow drift affects both equally.
                 trace_class = CLASS_FIXED if np.random.randint(0, 2) == 0 else CLASS_RANDOM
-                payload = prepare_trial(args, target, trace_class)
+                payload, trace_key = prepare_trial(args, target, trace_class)
 
                 # One signature per tile, all signing the same payload with the same key.
                 # Ed25519 derives its nonce from the message, so every repetition is the same
@@ -545,9 +657,7 @@ def main():
                         trsfile.SampleCoding.SHORT if args.sample_bits == 16
                         else trsfile.SampleCoding.BYTE,
                         samples,
-                        trsfile.parametermap.TraceParameterMap(
-                            {"ttest": trsfile.parametermap.ByteArrayParameter([trace_class])}
-                        ),
+                        _trace_params(args, trace_class, payload, trace_key),
                     ))
 
                 # Incremented only on success, so a dropped capture is retried rather than lost.

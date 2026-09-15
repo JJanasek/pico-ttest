@@ -148,6 +148,28 @@ ASCII, newline terminated. Replies: `+…` success, `-ERR …` failure, `#…` i
 | `s <hex>` | sign payload with the trigger asserted → `+OK <signature hex>` |
 | `e` | erase the active slot → `+OK` |
 
+## What each trace file records
+
+Every `.trs` now carries enough to reproduce and analyse the run, not just t-test it:
+
+* **Campaign metadata** (`TRACE_SET_PARAMETERS`, one copy per file): target, curve, mode, the
+  public key (message mode) or fixed scalar (scalar mode), the full scope setup (rate, gain,
+  skip, tiles, bits, trigger), the capture firmware version, the git commit of this code, a UTC
+  timestamp, and the exact command line.
+* **Per-trace fields** (`TRACE_PARAMETER_DEFINITIONS`): `ttest` (class byte, 0 = fixed / 1 =
+  random), `msg` (the 32 bytes actually signed), and in `--mode scalar` also `key` (the scalar
+  written that trace). Storing the message per trace is what turns a t-test-only set into one a
+  real key-recovery analysis can use.
+
+Read it back with:
+
+```sh
+python trs_info.py traces/set.trs
+```
+
+This matters because a viewer that re-saves a set often drops the free-text `DESCRIPTION`; the
+structured parameters survive and come back as real values (bytes as hex, rates as numbers).
+
 ## Collecting traces
 
 ```sh

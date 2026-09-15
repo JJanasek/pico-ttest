@@ -154,9 +154,12 @@ def parse_args():
                    help="capture each trace as N consecutive windows and concatenate them "
                         "(Husky, default: 1 = off). Husky holds 131,070 samples however fast the "
                         "ADC runs, so this is the only way to get high bandwidth over a long "
-                        "span: every tile signs the SAME payload with the SAME key, and Ed25519 "
-                        "is deterministic, so the tiles observe one computation through "
-                        "successive windows. Costs one signature per tile per trace")
+                        "span: every tile signs the SAME payload with the SAME key. Note the "
+                        "signature nonce still differs per tile - TROPIC01 folds the secure-"
+                        "channel nonce (which increments per L3 command) into it - so the "
+                        "message-processing part of each window lines up across tiles but the "
+                        "nonce-dependent part (scalar mult, H(R,A,M)) is a fresh execution each "
+                        "tile. Costs one signature per tile per trace")
     p.add_argument("--stream", action=argparse.BooleanOptionalAction, default=True,
                    help="stream samples (default) instead of filling Husky's 131,070 sample "
                         "buffer. Streaming keeps decimate at 1 - no aliasing - and lifts the "
@@ -630,9 +633,11 @@ def main():
                 trace_class = CLASS_FIXED if np.random.randint(0, 2) == 0 else CLASS_RANDOM
                 payload, trace_key = prepare_trial(args, target, trace_class)
 
-                # One signature per tile, all signing the same payload with the same key.
-                # Ed25519 derives its nonce from the message, so every repetition is the same
-                # computation - which is what makes the windows safe to concatenate.
+                # One signature per tile, all signing the same payload with the same key. The
+                # signature nonce differs per tile (TROPIC01 folds the per-command secure-channel
+                # nonce into it), so tiling lines up the message-processing windows across tiles
+                # while the nonce-dependent parts are a fresh execution each tile - fine for a
+                # message-dependent leak, not for one that rides on the nonce.
                 tile_samples = []
                 phase = {"arm": 0.0, "sign": 0.0, "read": 0.0}
                 sign_start = time.time()

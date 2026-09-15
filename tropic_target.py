@@ -222,9 +222,18 @@ class TropicTarget:
         self.command(f"k {curve} " + key.hex(), timeout=30.0)
 
     def sign(self, payload, timeout=None):
-        """Signs payload with the provisioned key; the target triggers the scope around the call."""
+        """Signs payload with the provisioned key; the target triggers the scope around the call.
+
+        Returns (signature, nonce). Firmware >= 3 replies '+OK <sig hex> <l3 nonce hex>', where the
+        nonce is the 12-byte secure-channel L3 IV used to encrypt this Sign command; older firmware
+        replies '+OK <sig hex>' and nonce is None. The last stored signature and nonce are also
+        kept on the instance for callers that ignore the return value.
+        """
         reply = self.command("s " + payload.hex(), timeout=timeout)
-        return bytes.fromhex(reply.split()[-1])
+        tokens = reply.split()          # e.g. ["OK", "<sig>", "<nonce>"]
+        self.last_signature = bytes.fromhex(tokens[1]) if len(tokens) >= 2 else b""
+        self.last_nonce = bytes.fromhex(tokens[2]) if len(tokens) >= 3 else None
+        return self.last_signature, self.last_nonce
 
     def erase(self):
         self.command("e", timeout=30.0)

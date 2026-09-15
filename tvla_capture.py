@@ -59,6 +59,8 @@ from tropic_target import (
 PAYLOAD_LEN = 32
 # TR01_ECDSA_EDDSA_SIGNATURE_LENGTH: 64 bytes for both Ed25519 and P256.
 SIG_LEN = 64
+# TR01_L3_IV_SIZE: the 12-byte secure-channel L3 IV reported per sign by firmware >= 3.
+NONCE_LEN = 12
 
 # The constant class of each campaign. Fixed but not degenerate (an all-zero scalar or message is
 # a special case in more than one implementation and makes a poor "fixed" class).
@@ -359,7 +361,9 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, label_y=
             f"pre_trigger={int(pre_trigger)} samples; {settings}",
         trsfile.Header.NUMBER_SAMPLES: int(n_samples),
         trsfile.Header.LENGTH_DATA:
-            1 + PAYLOAD_LEN + SIG_LEN + (PRIVKEY_LEN if args.mode == "scalar" else 0),
+            1 + PAYLOAD_LEN + SIG_LEN
+            + (NONCE_LEN if getattr(args, "has_nonce", False) else 0)
+            + (PRIVKEY_LEN if args.mode == "scalar" else 0),
         trsfile.Header.SAMPLE_CODING: coding,
         trsfile.Header.LABEL_X: "s",
         trsfile.Header.LABEL_Y: label_y,
@@ -386,13 +390,15 @@ def _trace_param_defs(args):
     defs["ttest"] = Def(T.BYTE, 1, offset); offset += 1
     defs["msg"] = Def(T.BYTE, PAYLOAD_LEN, offset); offset += PAYLOAD_LEN
     defs["sig"] = Def(T.BYTE, SIG_LEN, offset); offset += SIG_LEN
+    if getattr(args, "has_nonce", False):
+        defs["nonce"] = Def(T.BYTE, NONCE_LEN, offset); offset += NONCE_LEN
     if args.mode == "scalar":
         defs["key"] = Def(T.BYTE, PRIVKEY_LEN, offset); offset += PRIVKEY_LEN
     return trsfile.parametermap.TraceParameterDefinitionMap(defs)
 
 
-def _trace_params(args, trace_class, payload, key, signature):
-    """Per-trace values matching _trace_param_defs: class, message, signature, (scalar) key."""
+def _trace_params(args, trace_class, payload, key, signature, nonce=None):
+    """Per-trace values matching _trace_param_defs: class, message, signature, nonce, (scalar) key."""
     Byte = trsfile.parametermap.ByteArrayParameter
     # The signature is padded/truncated to the fixed field width; a mismatch means the target
     # returned something unexpected and is worth seeing rather than silently dropping.
@@ -401,6 +407,10 @@ def _trace_params(args, trace_class, payload, key, signature):
         sig = (sig + bytes(SIG_LEN))[:SIG_LEN]
     params = {"ttest": Byte([int(trace_class)]), "msg": Byte(list(payload)),
               "sig": Byte(list(sig))}
+    if getattr(args, "has_nonce", False):
+        nb = bytes(nonce or b"")
+        nb = (nb + bytes(NONCE_LEN))[:NONCE_LEN]
+        params["nonce"] = Byte(list(nb))
     if args.mode == "scalar":
         params["key"] = Byte(list(key if key is not None else FIXED_SCALAR))
     return trsfile.parametermap.TraceParameterMap(params)
@@ -526,6 +536,11 @@ def setup_target(args):
     target = TropicTarget(args.port, args.baud, verbose=args.verbose).open()
     fw_version = target.version()
     print("[*] Target version: " + fw_version)
+    # Firmware >= 3 reports the L3 nonce per sign; older firmware does not.
+    try:
+        args.has_nonce = int(fw_version.split()[-1]) >= 3
+    except (ValueError, IndexError):
+        args.has_nonce = False
 
     pubkey = None
     privkey = None
@@ -637,7 +652,7 @@ def main():
                             time.sleep(pre_trigger_wait)
 
                     tile_start = time.time()
-                    signature = target.sign(payload)
+                    signature, nonce = target.sign(payload)
                     tile_ms = (time.time() - tile_start) * 1e3
                     phase["sign"] += tile_ms * 1e-3
 
@@ -693,7 +708,8 @@ def main():
                         trsfile.SampleCoding.SHORT if args.sample_bits == 16
                         else trsfile.SampleCoding.BYTE,
                         samples,
-                        _trace_params(args, trace_class, payload, trace_key, signature),
+                        _trace_params(args, trace_class, payload, trace_key,
+                                      signature, nonce),
                     ))
 
                 # Incremented only on success, so a dropped capture is retried rather than lost.

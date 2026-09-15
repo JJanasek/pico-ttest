@@ -143,10 +143,10 @@ ASCII, newline terminated. Replies: `+…` success, `-ERR …` failure, `#…` i
 | Command | Meaning |
 | --- | --- |
 | `p` | ping → `+PONG` |
-| `v` | version → `+VERSION tvla-target 2` |
+| `v` | version → `+VERSION tvla-target 3` |
 | `g ed` / `g ec` | erase slot + generate Ed25519 / P256 key → `+OK <pubkey hex>` |
 | `k ed <hex>` / `k ec <hex>` | erase slot + store the given 32-byte private key → `+OK` |
-| `s <hex>` | sign payload with the trigger asserted → `+OK <signature hex>` |
+| `s <hex>` | sign payload with the trigger asserted → `+OK <signature hex> <l3 nonce hex>` |
 | `e` | erase the active slot → `+OK` |
 
 ## What each trace file records
@@ -158,9 +158,11 @@ Every `.trs` now carries enough to reproduce and analyse the run, not just t-tes
   skip, tiles, bits, trigger), the capture firmware version, the git commit of this code, a UTC
   timestamp, and the exact command line.
 * **Per-trace fields** (`TRACE_PARAMETER_DEFINITIONS`): `ttest` (class byte, 0 = fixed / 1 =
-  random), `msg` (the 32 bytes signed), `sig` (the 64-byte signature returned), and in
-  `--mode scalar` also `key` (the scalar written that trace). The message/signature pairs are
-  what turn a t-test-only set into one a real key-recovery analysis can use.
+  random), `msg` (the 32 bytes signed), `sig` (the 64-byte signature returned), `nonce` (the
+  12-byte secure-channel L3 IV used to encrypt that Sign command - zero at session start,
+  incremented per command, so it differs between traces even for the same message), and in
+  `--mode scalar` also `key` (the scalar written that trace). These per-trace inputs and outputs
+  are what turn a t-test-only set into one a real key-recovery analysis can use.
 
 Message mode generates the key on the chip by default, so only the **public** key is knowable -
 the private key never leaves the secure element. Pass `--priv-key <64 hex>` to store a known key

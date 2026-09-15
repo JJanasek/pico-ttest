@@ -13,11 +13,11 @@
  *
  * Protocol (ASCII, '\n' terminated, host -> target):
  *   p                 ping                       -> +PONG
- *   v                 version                    -> +VERSION tvla-target 2
+ *   v                 version                    -> +VERSION tvla-target 3
  *   g ed | g ec       erase slot + generate key  -> +OK <pubkey hex>
  *   k ed|ec <hex>     erase slot + store the given 32 byte private key (secret scalar), so the
  *                     host can run a fixed-vs-random *scalar* campaign  -> +OK
- *   s <hex>           sign payload with trigger  -> +OK <signature hex>
+ *   s <hex>           sign payload with trigger  -> +OK <signature hex> <l3 nonce hex>
  *   e                 erase the active slot      -> +OK
  * Replies: "+..." success, "-ERR ..." failure, "#..." informational/log (ignore on the host).
  */
@@ -97,6 +97,34 @@ Tropic01 tropic01(TROPIC01_CS_PIN
                   l3_buffer, sizeof(l3_buffer)
 #endif
 );
+
+// ------------------------------ Secure-channel nonce access -----------------------------
+// libtropic maintains an L3 nonce - the AES-GCM IV used to encrypt each L3 command
+// (handle.l3.encryption_IV): zeroed at session start, incremented by one per command. The value
+// in effect when a Sign command is encrypted is what a white-box analysis needs per trace, since
+// it differs between traces even when the message is identical.
+//
+// The Arduino wrapper keeps its lt_handle_t private with no accessor, so we reach it with the
+// standard explicit-instantiation access idiom (legal C++: an explicit template instantiation is
+// exempt from access checks). If libtropic-arduino gains a public accessor, replace this with it.
+namespace {
+template <typename Tag, typename Tag::type M>
+struct PrivateRob {
+    friend typename Tag::type robbed(Tag) { return M; }
+};
+struct Tropic01HandleTag {
+    typedef lt_handle_t Tropic01::*type;
+    friend type robbed(Tropic01HandleTag);
+};
+template struct PrivateRob<Tropic01HandleTag, &Tropic01::handle>;
+
+// Pointer to the 12-byte L3 IV (the secure-channel nonce) currently in the handle.
+static const uint8_t *secureChannelNonce(void)
+{
+    lt_handle_t &h = tropic01.*robbed(Tropic01HandleTag());
+    return h.l3.encryption_IV;
+}
+}  // namespace
 
 // Curve currently provisioned by the last successful `g` command.
 static lt_ecc_curve_type_t activeCurve = TR01_CURVE_ED25519;
@@ -323,6 +351,11 @@ static void handleSign(void)
         return;
     }
 
+    // The nonce that will encrypt this Sign command: read the IV now, before the call increments
+    // it. This happens outside the trigger window, so it adds nothing to the captured trace.
+    uint8_t nonceUsed[TR01_L3_IV_SIZE];
+    memcpy(nonceUsed, secureChannelNonce(), sizeof(nonceUsed));
+
     lt_ret_t ret;
     if (activeCurve == TR01_CURVE_ED25519) {
         digitalWrite(TVLA_TRIGGER_PIN, HIGH);
@@ -344,7 +377,18 @@ static void handleSign(void)
         return;
     }
 
-    replyHex("+OK ", sigBuf, sizeof(sigBuf));
+    // Reply: +OK <signature hex> <nonce hex>. The nonce is the 12-byte L3 IV used for this command.
+    Serial.print("+OK ");
+    for (size_t i = 0; i < sizeof(sigBuf); i++) {
+        if (sigBuf[i] < 0x10) Serial.print("0");
+        Serial.print(sigBuf[i], HEX);
+    }
+    Serial.print(" ");
+    for (size_t i = 0; i < sizeof(nonceUsed); i++) {
+        if (nonceUsed[i] < 0x10) Serial.print("0");
+        Serial.print(nonceUsed[i], HEX);
+    }
+    Serial.println();
 }
 
 // `e`: erase the active slot, e.g. to leave the chip clean at the end of a campaign.
@@ -408,7 +452,7 @@ void loop()
             Serial.println("+PONG");
             break;
         case 'v':
-            Serial.println("+VERSION tvla-target 2");
+            Serial.println("+VERSION tvla-target 3");
             break;
         case 'g':
             handleKeyGenerate();

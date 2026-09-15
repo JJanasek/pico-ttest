@@ -57,6 +57,8 @@ from tropic_target import (
 # Payload length. ECDSA on TROPIC01 signs a message hash and requires exactly 32 bytes; Ed25519
 # takes an arbitrary message, and 32 bytes keeps the two campaigns comparable.
 PAYLOAD_LEN = 32
+# TR01_ECDSA_EDDSA_SIGNATURE_LENGTH: 64 bytes for both Ed25519 and P256.
+SIG_LEN = 64
 
 # The constant class of each campaign. Fixed but not degenerate (an all-zero scalar or message is
 # a special case in more than one implementation and makes a poor "fixed" class).
@@ -337,7 +339,8 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, label_y=
             f"TROPIC01 {CURVE_NAMES[args.curve]} fixed-vs-random {args.mode} TVLA; "
             f"pre_trigger={int(pre_trigger)} samples; {settings}",
         trsfile.Header.NUMBER_SAMPLES: int(n_samples),
-        trsfile.Header.LENGTH_DATA: 1 + PAYLOAD_LEN + (PRIVKEY_LEN if args.mode == "scalar" else 0),
+        trsfile.Header.LENGTH_DATA:
+            1 + PAYLOAD_LEN + SIG_LEN + (PRIVKEY_LEN if args.mode == "scalar" else 0),
         trsfile.Header.SAMPLE_CODING: coding,
         trsfile.Header.LABEL_X: "s",
         trsfile.Header.LABEL_Y: label_y,
@@ -363,15 +366,22 @@ def _trace_param_defs(args):
     defs = {}
     defs["ttest"] = Def(T.BYTE, 1, offset); offset += 1
     defs["msg"] = Def(T.BYTE, PAYLOAD_LEN, offset); offset += PAYLOAD_LEN
+    defs["sig"] = Def(T.BYTE, SIG_LEN, offset); offset += SIG_LEN
     if args.mode == "scalar":
         defs["key"] = Def(T.BYTE, PRIVKEY_LEN, offset); offset += PRIVKEY_LEN
     return trsfile.parametermap.TraceParameterDefinitionMap(defs)
 
 
-def _trace_params(args, trace_class, payload, key):
-    """The per-trace values matching _trace_param_defs: class, message, and (scalar) key."""
+def _trace_params(args, trace_class, payload, key, signature):
+    """Per-trace values matching _trace_param_defs: class, message, signature, (scalar) key."""
     Byte = trsfile.parametermap.ByteArrayParameter
-    params = {"ttest": Byte([int(trace_class)]), "msg": Byte(list(payload))}
+    # The signature is padded/truncated to the fixed field width; a mismatch means the target
+    # returned something unexpected and is worth seeing rather than silently dropping.
+    sig = bytes(signature or b"")
+    if len(sig) != SIG_LEN:
+        sig = (sig + bytes(SIG_LEN))[:SIG_LEN]
+    params = {"ttest": Byte([int(trace_class)]), "msg": Byte(list(payload)),
+              "sig": Byte(list(sig))}
     if args.mode == "scalar":
         params["key"] = Byte(list(key if key is not None else FIXED_SCALAR))
     return trsfile.parametermap.TraceParameterMap(params)
@@ -601,7 +611,7 @@ def main():
                             time.sleep(pre_trigger_wait)
 
                     tile_start = time.time()
-                    target.sign(payload)
+                    signature = target.sign(payload)
                     tile_ms = (time.time() - tile_start) * 1e3
                     phase["sign"] += tile_ms * 1e-3
 
@@ -657,7 +667,7 @@ def main():
                         trsfile.SampleCoding.SHORT if args.sample_bits == 16
                         else trsfile.SampleCoding.BYTE,
                         samples,
-                        _trace_params(args, trace_class, payload, trace_key),
+                        _trace_params(args, trace_class, payload, trace_key, signature),
                     ))
 
                 # Incremented only on success, so a dropped capture is retried rather than lost.

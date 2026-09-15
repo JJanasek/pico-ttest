@@ -157,9 +157,9 @@ Every `.trs` now carries enough to reproduce and analyse the run, not just t-tes
   skip, tiles, bits, trigger), the capture firmware version, the git commit of this code, a UTC
   timestamp, and the exact command line.
 * **Per-trace fields** (`TRACE_PARAMETER_DEFINITIONS`): `ttest` (class byte, 0 = fixed / 1 =
-  random), `msg` (the 32 bytes actually signed), and in `--mode scalar` also `key` (the scalar
-  written that trace). Storing the message per trace is what turns a t-test-only set into one a
-  real key-recovery analysis can use.
+  random), `msg` (the 32 bytes signed), `sig` (the 64-byte signature returned), and in
+  `--mode scalar` also `key` (the scalar written that trace). The message/signature pairs are
+  what turn a t-test-only set into one a real key-recovery analysis can use.
 
 Read it back with:
 

@@ -86,6 +86,11 @@ def parse_args():
     p.add_argument("-m", "--mode", choices=("message", "scalar"), default="message",
                    help="what the fixed-vs-random split varies: the signed message (default) "
                         "or the secret scalar in the key slot")
+    p.add_argument("--priv-key", default=None,
+                   help="message mode: store this 32-byte hex private key instead of generating "
+                        "one on the chip. The default keygen keeps the private key inside the "
+                        "secure element (only the public key is knowable); supplying a known key "
+                        "records it, giving ground truth for validating a recovered key")
     p.add_argument("-o", "--outdir", default="traces", help="directory for the .trs file")
     p.add_argument("--traces-per-file", type=int, default=0,
                    help="roll over to a new .trs every N traces (0 = one file). A .trs is only "
@@ -184,6 +189,17 @@ def parse_args():
     if args.samples is None:
         args.samples = HUSKY_DEFAULT_SAMPLES if args.scope == "husky" else 2_000_000
 
+    if args.priv_key is not None:
+        if args.mode != "message":
+            p.error("--priv-key is for message mode; scalar mode already sets the key per trace")
+        try:
+            kb = bytes.fromhex(args.priv_key)
+        except ValueError:
+            p.error("--priv-key must be hex")
+        if len(kb) != PRIVKEY_LEN:
+            p.error(f"--priv-key must be {PRIVKEY_LEN} bytes ({2*PRIVKEY_LEN} hex chars)")
+        args.priv_key = kb
+
     if args.tiles < 1:
         p.error("--tiles must be at least 1")
     if args.sample_bits == 16 and args.scope != "husky":
@@ -276,8 +292,11 @@ def trace_set_params(args, n_samples, pre_trigger, meta):
     p["pre_trigger_samples"] = i(pre_trigger)
     p["fixed_payload"] = b(FIXED_PAYLOAD)
 
-    if args.mode == "message" and meta.get("pubkey") is not None:
-        p["public_key"] = b(meta["pubkey"])
+    if args.mode == "message":
+        if meta.get("pubkey") is not None:
+            p["public_key"] = b(meta["pubkey"])
+        if meta.get("privkey") is not None:
+            p["private_key"] = b(meta["privkey"])
     if args.mode == "scalar":
         p["fixed_scalar"] = b(FIXED_SCALAR)
 
@@ -509,16 +528,22 @@ def setup_target(args):
     print("[*] Target version: " + fw_version)
 
     pubkey = None
+    privkey = None
     if args.mode == "message":
         # One key for the whole campaign; only the message varies.
-        pubkey = target.keygen(args.curve)
-        print(f"[*] Generated {CURVE_NAMES[args.curve]} key, public key: {pubkey.hex()}")
+        if getattr(args, "priv_key", None) is not None:
+            target.store_key(args.curve, args.priv_key)
+            privkey = args.priv_key
+            print(f"[*] Stored known {CURVE_NAMES[args.curve]} private key: {privkey.hex()}")
+        else:
+            pubkey = target.keygen(args.curve)
+            print(f"[*] Generated {CURVE_NAMES[args.curve]} key, public key: {pubkey.hex()}")
     else:
         # The key is rewritten per trace; store the fixed one now so a rejected key or a worn out
         # slot shows up before the campaign rather than 2000 traces in.
         target.store_key(args.curve, FIXED_SCALAR)
         print(f"[*] Stored the fixed {CURVE_NAMES[args.curve]} scalar (rewritten per trace)")
-    return target, pubkey, fw_version
+    return target, pubkey, privkey, fw_version
 
 
 def prepare_trial(args, target, trace_class):
@@ -546,9 +571,10 @@ def main():
     pre_trigger = preTriggerSamples(args.pre_trigger, args.samples)
 
     import datetime, shlex, sys as _sys
-    target, pubkey, fw_version = setup_target(args)
+    target, pubkey, privkey, fw_version = setup_target(args)
     meta = {
         "pubkey": pubkey,
+        "privkey": privkey,
         "fw_version": fw_version,
         "git": git_commit(),
         "created": datetime.datetime.now(datetime.timezone.utc)

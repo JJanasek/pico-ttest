@@ -161,6 +161,11 @@ Every `.trs` now carries enough to reproduce and analyse the run, not just t-tes
   `--mode scalar` also `key` (the scalar written that trace). The message/signature pairs are
   what turn a t-test-only set into one a real key-recovery analysis can use.
 
+Message mode generates the key on the chip by default, so only the **public** key is knowable -
+the private key never leaves the secure element. Pass `--priv-key <64 hex>` to store a known key
+instead; it is then recorded as `private_key`, which is what gives you ground truth when checking
+whether an attack recovered the right key.
+
 Read it back with:
 
 ```sh

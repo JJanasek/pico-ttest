@@ -1,8 +1,8 @@
-# TROPIC01 TVLA capture (ChipWhisperer-Husky or PicoScope 3000 + ESP32)
+# TROPIC01 TVLA capture (ChipWhisperer-Husky or PicoScope + ESP32)
 
 Fixed-vs-random TVLA trace collection against a TROPIC01 secure element driven by an ESP32.
-Default scope is a ChipWhisperer-Husky (`--scope husky`); a PicoScope 3000 path is under
-`--scope pico`.
+Default scope is a ChipWhisperer-Husky (`--scope husky`); a PicoScope path is under
+`--scope pico` (3000 Series by default; `--pico-series 6000` for a 6404D, `2000` for the ps2000a models).
 
 ## Layout
 
@@ -12,6 +12,7 @@ Default scope is a ChipWhisperer-Husky (`--scope husky`); a PicoScope 3000 path 
 | [tropic_target.py](tropic_target.py) | firmware build/upload + serial client for the target |
 | [husky.py](husky.py) / [pico.py](pico.py) | scope wrappers (Husky / PicoScope) |
 | [trigger_check.py](trigger_check.py) | diagnostic: what the trigger input sees during one signature |
+| [sign_loop.py](sign_loop.py) | sign in a loop without capturing, to set the scope up by hand in its GUI |
 | [merge_trs.py](merge_trs.py) | reassemble `--traces-per-file` parts into one set |
 | [trs_info.py](trs_info.py) | print a set's metadata (key, scope setup, per-trace fields) |
 | [firmware/](firmware/) | PlatformIO project (`esp32dev_tvla`) that builds the capture firmware |
@@ -21,6 +22,7 @@ Default scope is a ChipWhisperer-Husky (`--scope husky`); a PicoScope 3000 path 
 ```sh
 source ~/.cwvenv/bin/activate          # chipwhisperer env, for --scope husky
 python trigger_check.py --trigger-pin tio4        # verify the trigger first
+python sign_loop.py                               # or: keep signing (Ctrl-C stops) and watch in the GUI
 python tvla_capture.py -n 3000 -c ed -m message   # collect (flashes firmware unless --no-flash)
 python trs_info.py traces/*.trs                    # inspect what was recorded
 ```
@@ -48,9 +50,24 @@ board ground, so that shorts the shunt (and, high-side, the 3.3 V rail). Using b
 
 ### PicoScope (`--scope pico`)
 
-GPIO4 → a scope **channel** (not Ext; Ext is rejected at arm time), `--trigger-source B`. Shunt/EM
+GPIO4 → **Ext** on a D model such as the 3406D (`--trigger-source ext`, the default). Ext leaves
+only the measured channel enabled, so it can run at 1 GS/s; a channel trigger halves that. A/B
+models have no Ext - use a channel there, `--trigger-source B`. Shunt/EM
 probe → channel A, AC coupled (`--coupling AC --volt-div 0.01`). Mind ×10 probe attenuation on both
 the trigger (drop `--trigger-level`) and the measurement (use ×1).
+
+**6404D** (`--pico-series 6000`, ps6000 driver; the newer 6000E models use ps6000a and are not
+covered). Here "ext" is the **AUX** BNC: 50 Ω, with a fixed ±1 V threshold range. Don't wire the GPIO
+straight to it, because 3.3 V into 50 Ω asks the ESP32 pin for ~66 mA. Put a ~470 Ω resistor in series
+instead (≈0.3 V at the input); `--trigger-level` defaults to 0.15 V on AUX. Alternatively, trigger on
+a 1 MΩ channel (`--trigger-source B`, the usual 1.5 V). Other differences:
+
+* AC coupling exists only at 1 MΩ, so keep the shunt on `--coupling AC`. `--coupling DC50` is for
+  an amplifier output, never a shunt that carries DC.
+* The smallest range is ±50 mV, which is the `--volt-div 0.01` default.
+* `--bw-limit` is 25 MHz (not 20).
+* The timebase grid is 156.25 MHz / n, so 12.5 MS/s lands on 13.02 MS/s. The achieved rate is the
+  one recorded; `--sample-rate 15.625e6` hits the grid exactly.
 
 ### Serial
 
@@ -147,4 +164,6 @@ find .pio/libdeps -maxdepth 3 -type d \( -name libtropic_build -o -name hal_cal_
 ## Requirements
 
 `numpy`, `pyserial`, `trsfile`, PlatformIO CLI. For `--scope husky`: `chipwhisperer` (in `~/.cwvenv`).
-For `--scope pico`: PicoSDK + `picosdk` bindings. Only the selected scope's library is imported.
+For `--scope pico`: PicoSDK + `picosdk` bindings, with the driver for your series (`libps3000a`,
+`libps2000a` or `libps6000`). Only the selected series' library is loaded; if the SDK sits outside
+the linker path, point `LD_LIBRARY_PATH` at its `lib/`.

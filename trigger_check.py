@@ -14,7 +14,8 @@
 # Husky:  run it with the trigger wire on --trigger-pin (default tio4 = 20-pin header pin 16),
 #         and the ESP32 ground on pin 17 or 19.
 # Pico:   run it with the trigger wire on the channel you pass as --channel (default B, matching
-#         tvla_capture.py --trigger-source B). Ground the probe to the ESP32 ground.
+#         tvla_capture.py --trigger-source B). Ground the probe to the ESP32 ground. Ext (or AUX
+#         on a 6000 Series) only triggers and cannot be sampled, so check the pulse on a channel.
 import argparse
 import threading
 import time
@@ -38,6 +39,9 @@ def parse_args():
     p.add_argument("--trigger-pin", default=HUSKY_DEFAULT_TRIGGER_PIN, choices=HUSKY_TRIGGER_PINS,
                    help="Husky input the trigger wire is on; tio4 is 20-pin header pin 16 "
                         "(default: %(default)s)")
+    p.add_argument("--pico-series", choices=("3000", "2000", "6000"), default="3000",
+                   help="PicoScope family: 3000 (ps3000a), 2000 (ps2000a) or 6000 (ps6000, "
+                        "e.g. 6404D)")
     p.add_argument("--channel", default="B", choices=("A", "B", "C", "D"),
                    help="PicoScope channel the trigger wire is on (default: B)")
     p.add_argument("--curve", choices=("ed", "ec"), default="ed", help="curve to sign with")
@@ -157,12 +161,12 @@ def check_husky(args, target):
 
 
 def check_pico(args, target):
-    from pico import pico3000
+    from pico import PICO_SERIES
 
     channel = "ABCD".index(args.channel)
     n_samples = int(args.window_ms * 1e-3 * args.sample_rate)
 
-    scope = pico3000()
+    scope = PICO_SERIES[args.pico_series]()
     scope.connect()
     # Measure the trigger line directly: +-5V range (voltsPerDivision * 5), untriggered capture.
     scope.setChannel(channel, 1.0, args.sample_rate, n_points=n_samples)

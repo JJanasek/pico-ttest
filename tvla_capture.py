@@ -1,6 +1,6 @@
 ## tvla_capture.py
 # Non-specific (fixed vs random) TVLA trace collection for TROPIC01 on an ESP32, captured with
-# a ChipWhisperer-Husky (default) or a PicoScope 3000 (--scope pico).
+# a ChipWhisperer-Husky (default) or a PicoScope 3000/2000/6000 (--scope pico, --pico-series).
 #
 # Two campaigns, selected with --mode:
 #   message  the key stays fixed, the signed message is either FIXED or fresh RANDOM,
@@ -18,8 +18,11 @@
 # Wiring, Husky:  ESP32 trigger GPIO -> 20-pin pin 16 (TIO4), ESP32 GND -> pin 17/19,
 #                 shunt -> MEASURE SMA (differential across a high-side shunt, single-ended
 #                 plus the short-circuit cap for a low-side one).
-# Wiring, Pico:   ESP32 trigger GPIO -> a scope channel (--trigger-source, Ext is unreliable
-#                 here), EM/shunt probe -> the measured channel (--channel, AC coupled).
+# Wiring, Pico:   ESP32 trigger GPIO -> Ext on a D model (default), or an analog channel
+#                 (--trigger-source B), EM/shunt probe -> the measured channel (--channel, AC
+#                 coupled). Ext keeps every channel free, so the measured one gets 1 GS/s.
+#                 On a 6000 Series (6404D) "ext" is the AUX BNC: 50 ohm, +-1 V, so feed it
+#                 through a series resistor and trigger low (see --trigger-level).
 #
 # This replaces pico3000.py, which drove a ChipWhisperer target over simpleserial and flashed it
 # with make + cw.program_target.
@@ -65,6 +68,14 @@ NONCE_LEN = 12
 # The constant class of each campaign. Fixed but not degenerate (an all-zero scalar or message is
 # a special case in more than one implementation and makes a poor "fixed" class).
 FIXED_PAYLOAD = bytes.fromhex("da39a3ee5e6b4b0d3255bfef95601890afd80709") + bytes(PAYLOAD_LEN - 20)
+# Longest message the capture firmware accepts (TVLA_MAX_MSG_LEN in tvla_target.cpp).
+MAX_MSG_LEN = 256
+
+
+def fixed_payload(msg_len):
+    """The fixed-class message at the requested length: FIXED_PAYLOAD, repeated or cut to fit."""
+    reps = -(-msg_len // len(FIXED_PAYLOAD))
+    return (FIXED_PAYLOAD * reps)[:msg_len]
 FIXED_SCALAR = bytes.fromhex("0f1e2d3c4b5a69788796a5b4c3d2e1f0" * 2)
 
 CURVE_NAMES = {"ed": "Ed25519-EdDSA", "ec": "P256-ECDSA"}
@@ -76,7 +87,7 @@ CLASS_RANDOM = 1
 def parse_args():
     p = argparse.ArgumentParser(
         description="Fixed-vs-random TVLA trace collection for TROPIC01 (ESP32 target, "
-                    "ChipWhisperer-Husky or PicoScope 3000)"
+                    "ChipWhisperer-Husky or PicoScope 3000/2000/6000)"
     )
 
     p.add_argument("--scope", choices=("husky", "pico"), default="husky",
@@ -93,6 +104,10 @@ def parse_args():
                         "one on the chip. The default keygen keeps the private key inside the "
                         "secure element (only the public key is knowable); supplying a known key "
                         "records it, giving ground truth for validating a recovered key")
+    p.add_argument("--msg-len", type=int, default=PAYLOAD_LEN,
+                   help="message length in bytes (default 32; Ed25519 only, up to 256). The nonce "
+                        "TMAC runs per 18 B and the SHA-512 per 128 B, so sweeping the length "
+                        "shows which part of the trace is message-dependent")
     p.add_argument("-o", "--outdir", default="traces", help="directory for the .trs file")
     p.add_argument("--traces-per-file", type=int, default=0,
                    help="roll over to a new .trs every N traces (0 = one file). A .trs is only "
@@ -140,8 +155,9 @@ def parse_args():
                         "default: %(default)s). The "
                         "trigger GPIO's own edge couples into the measurement and clips the ADC; "
                         "skipping past it lets --gain-db be set for the signature instead")
-    p.add_argument("--sample-bits", type=int, default=16, choices=(8, 16),
-                   help="bits per stored sample (Husky, default: %(default)s). Husky's ADC is "
+    p.add_argument("--sample-bits", type=int, default=None, choices=(8, 16),
+                   help="bits per stored sample (Husky, default: 16; a PicoScope is always 8). "
+                        "Husky's ADC is "
                         "12 bit, so 8 discards four of them; 16 keeps the lot at twice the disk. "
                         "It matters most at low gain, where the signal uses little of the ADC "
                         "range and quantisation starts to show")
@@ -168,23 +184,51 @@ def parse_args():
                         "to cover the whole signature in one window")
 
     # PicoScope only.
+    p.add_argument("--pico-series", choices=("3000", "2000", "6000"), default="3000",
+                   help="PicoScope family: 3000 (ps3000a driver), 2000 (ps2000a driver: 2205A "
+                        "MSO, 2206B-2208B, 2405A-2408B) or 6000 (ps6000 driver: 6402-6404 C/D, "
+                        "6407; not the 6000E Series)")
     p.add_argument("--channel", type=int, default=0, help="scope channel to measure (0 = A)")
+    p.add_argument("--bw-limit", action="store_true",
+                   help="PicoScope: switch on the measured channel's bandwidth limiter (the "
+                        "GUI's 'Bandwidth limit' option): 20 MHz on the 3000 Series and the "
+                        "6402/6403, 25 MHz on the 6404")
     p.add_argument("--volt-div", type=float, default=1e-2,
                    help="volts per division on the measured channel; the range picked is 5x this "
-                        "(default: 0.01 = +-50mV)")
-    p.add_argument("--coupling", default="AC", choices=("AC", "DC"),
+                        "(default: 0.01 = +-50mV, the smallest range a 6404D has)")
+    p.add_argument("--coupling", default="AC", choices=("AC", "DC", "DC50"),
                    help="coupling of the measured channel. AC removes the DC bias of a power or "
-                        "EM trace so the small range is usable (default: AC)")
+                        "EM trace so the small range is usable (default: AC). DC50 = DC into "
+                        "50 ohm, 6000 Series only - for an amplifier output, never straight "
+                        "across a shunt that carries DC")
     p.add_argument("--offset", type=float, default=0.0, help="analog offset in volts")
     p.add_argument("--trigger-source", default="ext", choices=("ext", "A", "B", "C", "D"),
                    help="where the ESP32 trigger GPIO is wired. Ext exists only on 3000 Series D "
-                        "models; on A/B models use an analog channel (default: ext)")
-    p.add_argument("--trigger-level", type=float, default=1.5,
-                   help="trigger threshold in volts (default: 1.5, mid-rail for 3.3V logic)")
+                        "models; on A/B models use an analog channel. On the 6000 Series it is "
+                        "the AUX input (default: ext)")
+    p.add_argument("--trigger-level", type=float, default=None,
+                   help="trigger threshold in volts (default: 1.5, mid-rail for 3.3V logic; "
+                        "0.15 on the 6000 Series AUX input, which is 50 ohm with a +-1V range "
+                        "- feed it through a ~470 ohm series resistor, giving ~0.3V)")
     p.add_argument("--trigger-range", type=float, default=5.0,
                    help="full scale of the trigger channel in volts, DC coupled (default: 5.0)")
 
     p.add_argument("-v", "--verbose", action="store_true", help="echo the target's '#' log lines")
+
+    g = p.add_argument_group("setup notes",
+                             "recorded verbatim in the .trs so a set can be told apart later")
+    g.add_argument("--shunt-ohm", type=float, default=None, help="shunt resistor value")
+    g.add_argument("--probe", default=None,
+                   help="how the signal is picked up, e.g. 'shunt low-side', 'EM probe at X,Y'")
+    g.add_argument("--supply-v", type=float, default=None, help="chip supply voltage")
+    g.add_argument("--temperature-c", type=float, default=None, help="ambient/board temperature")
+    g.add_argument("--spect-fw-rev", default=None,
+                   help="revision of the SPECT firmware on the chip (ts-spect-fw git hash/tag)")
+    g.add_argument("--chip-note", default=None,
+                   help="chip identification: sample number, revision, clock configuration")
+    g.add_argument("--marker", default=None,
+                   help="what an extra scope channel records, e.g. 'CH2 = SPI CS'")
+    g.add_argument("--note", default=None, help="free text")
 
     args = p.parse_args()
     # The two scopes have nothing like the same capture depth, so their sensible defaults differ:
@@ -193,6 +237,20 @@ def parse_args():
         args.sample_rate = HUSKY_DEFAULT_SAMPLE_RATE if args.scope == "husky" else 12.5e6
     if args.samples is None:
         args.samples = HUSKY_DEFAULT_SAMPLES if args.scope == "husky" else 2_000_000
+    # A fixed default of 16 made every --scope pico run fail the check below unless
+    # --sample-bits 8 was passed by hand.
+    if args.sample_bits is None:
+        args.sample_bits = 16 if args.scope == "husky" else 8
+    if args.trigger_level is None:
+        aux = args.pico_series == "6000" and args.trigger_source == "ext"
+        args.trigger_level = 0.15 if aux else 1.5
+    if args.coupling == "DC50" and args.pico_series != "6000":
+        p.error("--coupling DC50 needs --pico-series 6000; the other series have no 50 ohm input")
+
+    if args.curve == "ec" and args.msg_len != PAYLOAD_LEN:
+        p.error("--msg-len is Ed25519 only: ECDSA signs a fixed 32-byte hash")
+    if not 1 <= args.msg_len <= MAX_MSG_LEN:
+        p.error(f"--msg-len must be 1..{MAX_MSG_LEN}")
 
     if args.priv_key is not None:
         if args.mode != "message":
@@ -295,7 +353,27 @@ def trace_set_params(args, n_samples, pre_trigger, meta):
     p["tiles"] = i(args.tiles)
     p["total_samples"] = i(n_samples)
     p["pre_trigger_samples"] = i(pre_trigger)
-    p["fixed_payload"] = b(FIXED_PAYLOAD)
+    p["fixed_payload"] = b(fixed_payload(args.msg_len))
+    p["msg_len"] = i(args.msg_len)
+    p["sample_period_s"] = d(1.0 / meta.get("sample_rate", args.sample_rate))
+    p["window_s"] = d(n_samples / meta.get("sample_rate", args.sample_rate))
+    # Time origin: nothing else in the file says what t=0 is.
+    p["time_origin"] = s("sample 0 = {} samples after the trigger edge; trigger is raised by the "
+                         "ESP32 just before libtropic's sign call and dropped when it returns, so "
+                         "it brackets the whole L3 Sign transaction (secure channel, SPI, key load, "
+                         "SPECT, response)".format("-" + str(pre_trigger) if pre_trigger else "0"))
+    p["tile_note"] = s("each tile is a separate signature; do not analyse across tile boundaries"
+                       if args.tiles > 1 else "single capture per trace")
+    p["ecc_slot"] = i(meta.get("slot", 0))
+    for key, val in (("shunt_ohm", args.shunt_ohm), ("supply_V", args.supply_v),
+                     ("temperature_C", args.temperature_c)):
+        if val is not None:
+            p[key] = d(val)
+    for key, val in (("probe", args.probe), ("spect_fw_rev", args.spect_fw_rev),
+                     ("chip_note", args.chip_note), ("marker_channel", args.marker),
+                     ("note", args.note)):
+        if val:
+            p[key] = s(val)
 
     if args.mode == "message":
         if meta.get("pubkey") is not None:
@@ -314,7 +392,10 @@ def trace_set_params(args, n_samples, pre_trigger, meta):
         p["sample_bits"] = i(args.sample_bits)
         p["trigger"] = s(args.trigger_pin)
     else:
+        p["pico_series"] = s(args.pico_series)
+        p["pico_model"] = s(meta.get("scope_model", "unknown"))
         p["channel"] = i(args.channel)
+        p["bw_limit"] = s(meta.get("bw_limit", "full"))
         p["volt_per_div"] = d(args.volt_div)
         p["coupling"] = s(args.coupling)
         p["trigger"] = s(str(args.trigger_source))
@@ -347,8 +428,8 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, label_y=
             settings += " tiles={}x{}".format(args.tiles, args.samples)
         settings += " {}bit".format(args.sample_bits)
     else:
-        settings = ("pico ch{} {:.4g}V/div {} {:.3f}MS/s x{} samples"
-                    .format(args.channel, args.volt_div, args.coupling,
+        settings = ("pico{} ch{} {:.4g}V/div {} {:.3f}MS/s x{} samples"
+                    .format(args.pico_series, args.channel, args.volt_div, args.coupling,
                             args.sample_rate / 1e6, args.samples))
 
     coding = (trsfile.SampleCoding.SHORT if getattr(args, "sample_bits", 8) == 16
@@ -363,10 +444,7 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, label_y=
             f"TROPIC01 {CURVE_NAMES[args.curve]} fixed-vs-random {args.mode} TVLA; "
             f"pre_trigger={int(pre_trigger)} samples; {settings}",
         trsfile.Header.NUMBER_SAMPLES: int(n_samples),
-        trsfile.Header.LENGTH_DATA:
-            1 + PAYLOAD_LEN + SIG_LEN
-            + (NONCE_LEN if getattr(args, "has_nonce", False) else 0)
-            + (PRIVKEY_LEN if args.mode == "scalar" else 0),
+        trsfile.Header.LENGTH_DATA: _trace_param_bytes(args),
         trsfile.Header.SAMPLE_CODING: coding,
         trsfile.Header.LABEL_X: "s",
         trsfile.Header.LABEL_Y: label_y,
@@ -380,6 +458,11 @@ def open_trace_file(args, n_samples, volt_div, time_div, pre_trigger=0, label_y=
     return path, trsfile.trs_open(path, mode="w", headers=headers)
 
 
+def _trace_param_bytes(args):
+    """Bytes of per-trace data, derived from the definitions so the two cannot disagree."""
+    return sum(d.length * d.param_type.byte_size for d in _trace_param_defs(args).values())
+
+
 def _trace_param_defs(args):
     """Per-trace fields: the class byte, the message signed, and (scalar mode) the key written.
 
@@ -391,8 +474,12 @@ def _trace_param_defs(args):
     offset = 0
     defs = {}
     defs["ttest"] = Def(T.BYTE, 1, offset); offset += 1
-    defs["msg"] = Def(T.BYTE, PAYLOAD_LEN, offset); offset += PAYLOAD_LEN
+    defs["msg"] = Def(T.BYTE, args.msg_len, offset); offset += args.msg_len
     defs["sig"] = Def(T.BYTE, SIG_LEN, offset); offset += SIG_LEN
+    # Host-side timing of this trace: when it was taken, and how long the sign call took as the
+    # host saw it (serial round-trip included). Drift over a campaign and outlier traces show here.
+    defs["t_unix"] = Def(T.DOUBLE, 1, offset); offset += 8
+    defs["sign_ms"] = Def(T.FLOAT, 1, offset); offset += 4
     if getattr(args, "has_nonce", False):
         defs["nonce"] = Def(T.BYTE, NONCE_LEN, offset); offset += NONCE_LEN
     if args.mode == "scalar":
@@ -400,7 +487,8 @@ def _trace_param_defs(args):
     return trsfile.parametermap.TraceParameterDefinitionMap(defs)
 
 
-def _trace_params(args, trace_class, payload, key, signature, nonce=None):
+def _trace_params(args, trace_class, payload, key, signature, nonce=None, t_unix=0.0,
+                  sign_ms=0.0):
     """Per-trace values matching _trace_param_defs: class, message, signature, nonce, (scalar) key."""
     Byte = trsfile.parametermap.ByteArrayParameter
     # The signature is padded/truncated to the fixed field width; a mismatch means the target
@@ -409,7 +497,9 @@ def _trace_params(args, trace_class, payload, key, signature, nonce=None):
     if len(sig) != SIG_LEN:
         sig = (sig + bytes(SIG_LEN))[:SIG_LEN]
     params = {"ttest": Byte([int(trace_class)]), "msg": Byte(list(payload)),
-              "sig": Byte(list(sig))}
+              "sig": Byte(list(sig)),
+              "t_unix": trsfile.parametermap.DoubleArrayParameter([float(t_unix)]),
+              "sign_ms": trsfile.traceparameter.FloatArrayParameter([float(sign_ms)])}
     if getattr(args, "has_nonce", False):
         nb = bytes(nonce or b"")
         nb = (nb + bytes(NONCE_LEN))[:NONCE_LEN]
@@ -504,9 +594,9 @@ def setup_husky(args, pre_trigger=0):
 
 def setup_pico(args, pre_trigger=0):
     # picosdk is a separate install from chipwhisperer, so it is only pulled in when asked for.
-    from pico import PS3000A_EXTERNAL, pico3000
+    from pico import PICO_SERIES
 
-    scope = pico3000()
+    scope = PICO_SERIES[args.pico_series]()
     scope.connect()
     volt_div, time_div, sample_rate = scope.setChannel(
         args.channel, args.volt_div, args.sample_rate,
@@ -519,7 +609,12 @@ def setup_pico(args, pre_trigger=0):
                   1e3 * args.samples / sample_rate, 1e3 * pre_trigger / sample_rate,
                   1e3 * (args.samples - pre_trigger) / sample_rate))
     if args.trigger_source == "ext":
-        trigger_channel = PS3000A_EXTERNAL
+        # Fail here, with the reason, rather than on the first arm with PICO_TRIGGER_ERROR.
+        if not scope.hasExtTrigger():
+            raise ValueError("PicoScope {} has no Ext trigger input - wire the trigger GPIO to "
+                             "an analog channel and pass e.g. --trigger-source B"
+                             .format(scope.variant))
+        trigger_channel = scope.EXT_CHANNEL
     else:
         trigger_channel = "ABCD".index(args.trigger_source)
         if trigger_channel == args.channel:
@@ -528,8 +623,14 @@ def setup_pico(args, pre_trigger=0):
         # long logic-high pulse does not droop back below the level.
         scope.enableChannel(trigger_channel, rangeVolts=args.trigger_range)
 
+    if args.bw_limit:
+        scope.setBandwidthLimit(args.channel)
+
     scope.setTriggerChannel(trigger_channel, enable=1, level=args.trigger_level)
-    return scope, volt_div, time_div, "V"
+    # Enabling the trigger channel can move the sample rate, so report what the scope ended up
+    # with rather than what setChannel first chose.
+    scope.describe(trigger_channel, args.trigger_level, pre_trigger, args.coupling)
+    return scope, scope.voltDiv, scope.timeDiv, "V"
 
 
 def setup_target(args):
@@ -571,12 +672,13 @@ def prepare_trial(args, target, trace_class):
     inside the trigger window.
     """
     if args.mode == "message":
-        payload = FIXED_PAYLOAD if trace_class == CLASS_FIXED else os.urandom(PAYLOAD_LEN)
+        payload = (fixed_payload(args.msg_len) if trace_class == CLASS_FIXED
+                   else os.urandom(args.msg_len))
         return payload, None
 
     key = FIXED_SCALAR if trace_class == CLASS_FIXED else os.urandom(PRIVKEY_LEN)
     target.store_key(args.curve, key)
-    return FIXED_PAYLOAD, key
+    return fixed_payload(args.msg_len), key
 
 
 def main():
@@ -599,11 +701,19 @@ def main():
                        .strftime("%Y-%m-%dT%H:%M:%SZ"),
         "command": shlex.join(_sys.argv),
         "sample_rate": args.sample_rate,
+        # Slots as in tvla_target.cpp (ECC_SLOT_ED25519 / ECC_SLOT_ECDSA).
+        "slot": 1 if args.curve == "ed" else 2,
     }
     try:
         if not args.no_scope:
             check_disk_budget(args, args.samples * args.tiles)
             scope, volt_div, time_div, label_y = setup_scope(args, pre_trigger)
+            # The rate the scope actually runs at (quantized to its timebase grid), not the one
+            # asked for - sample_period_s and window_s are derived from it.
+            meta["sample_rate"] = scope.sampleRate
+            meta["scope_model"] = getattr(scope, "variant", "unknown")
+            # What the limiter really is depends on the model (20 or 25 MHz), not on the flag.
+            meta["bw_limit"] = getattr(scope, "bandwidthLimit", "full")
             # time_div describes one tile's window, but SCALE_X is derived as
             # 10 * time_div / total_samples - the .trs convention being ten divisions across the
             # whole trace. Scaling it by the tile count keeps seconds-per-sample at 1/rate;
@@ -714,7 +824,7 @@ def main():
                         else trsfile.SampleCoding.BYTE,
                         samples,
                         _trace_params(args, trace_class, payload, trace_key,
-                                      signature, nonce),
+                                      signature, nonce, t_unix=sign_start, sign_ms=total_ms),
                     ))
 
                 # Incremented only on success, so a dropped capture is retried rather than lost.

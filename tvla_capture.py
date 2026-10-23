@@ -645,6 +645,10 @@ def setup_target(args):
         args.has_nonce = int(fw_version.split()[-1]) >= 3
     except (ValueError, IndexError):
         args.has_nonce = False
+    if not args.has_nonce:
+        print("[!] This firmware is older than tvla-target 3, so the per-trace secure-channel "
+              "nonce will not be recorded. Flash the repo's firmware/src/tvla_target.cpp "
+              f"(the project built is {args.project_dir})")
 
     pubkey = None
     privkey = None

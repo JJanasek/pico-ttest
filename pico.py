@@ -80,6 +80,10 @@ class pico3000():
     _prefix_upper = "PS3000A"
     series = "3000"
 
+    # GetValues' downSampleRatio. With RATIO_MODE_NONE ps3000a/ps2000a take 0 (as in Pico's
+    # examples); ps6000 rejects 0 with PICO_INVALID_PARAMETER ("must be greater than zero").
+    _downSampleRatio = 0
+
     # The trigger-only input (Ext on a D model) and the fixed scale its threshold is given in.
     EXT_CHANNEL = PS3000A_EXTERNAL
     EXT_MAX_VALUE = PS3000A_EXT_MAX_VALUE
@@ -493,7 +497,7 @@ class pico3000():
             # GetValues uses cmaxSamples as an in/out parameter, so it has to be reset to the
             # buffer size before every capture - otherwise a short block shrinks all later ones.
             self.cmaxSamples = ctypes.c_int32(self.n_points)
-            self.status["GetValues"] = self._call("GetValues", self.chandle, 0, ctypes.byref(self.cmaxSamples), 0, 0, 0, ctypes.byref(self.overflow))
+            self.status["GetValues"] = self._call("GetValues", self.chandle, 0, ctypes.byref(self.cmaxSamples), self._downSampleRatio, 0, 0, ctypes.byref(self.overflow))
             assert_pico_ok(self.status["GetValues"])
             # Every trace in a .trs has the same length, so a short block is an error rather
             # than something to write.
@@ -760,6 +764,7 @@ class pico6000(pico3000):
     _prefix = "ps6000"
     _prefix_upper = "PS6000"
     series = "6000"
+    _downSampleRatio = 1
 
     EXT_CHANNEL = PS6000_TRIGGER_AUX
     EXT_MAX_VALUE = PS6000_MAX_VALUE

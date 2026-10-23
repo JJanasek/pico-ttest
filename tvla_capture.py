@@ -321,11 +321,24 @@ def git_commit():
                               "rev-parse", "--short", "HEAD"],
                              capture_output=True, text=True, timeout=5)
         rev = out.stdout.strip()
-        dirty = subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(__file__)),
-                                "status", "--porcelain"], capture_output=True, text=True, timeout=5)
-        return (rev + ("-dirty" if dirty.stdout.strip() else "")) if rev else "unknown"
+        return (rev + ("-dirty" if git_changes() else "")) if rev else "unknown"
     except Exception:
         return "unknown"
+
+
+def git_changes():
+    """Tracked files that differ from the commit, so a "-dirty" set says what was different.
+
+    Untracked files (trace sets, notes) do not change how a capture is made and are left out.
+    """
+    try:
+        import subprocess
+        out = subprocess.run(["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+                              "status", "--porcelain", "--untracked-files=no"],
+                             capture_output=True, text=True, timeout=5)
+        return [line[3:] for line in out.stdout.splitlines() if line.strip()]
+    except Exception:
+        return []
 
 
 def trace_set_params(args, n_samples, pre_trigger, meta):
@@ -400,9 +413,16 @@ def trace_set_params(args, n_samples, pre_trigger, meta):
         p["coupling"] = s(args.coupling)
         p["trigger"] = s(str(args.trigger_source))
         p["trigger_level_V"] = d(args.trigger_level)
+        if args.trigger_source != "ext":
+            p["trigger_range_V"] = d(args.trigger_range)
+        p["offset_V"] = d(args.offset)
+        if meta.get("scope_serial"):
+            p["scope_serial"] = s(meta["scope_serial"])
 
     p["firmware"] = s(meta.get("fw_version", "unknown"))
     p["capture_git"] = s(meta.get("git", "unknown"))
+    if meta.get("git_changes"):
+        p["capture_git_changes"] = s(", ".join(meta["git_changes"]))
     p["created_utc"] = s(meta.get("created", ""))
     p["command"] = s(meta.get("command", ""))
     return p
@@ -480,6 +500,10 @@ def _trace_param_defs(args):
     # host saw it (serial round-trip included). Drift over a campaign and outlier traces show here.
     defs["t_unix"] = Def(T.DOUBLE, 1, offset); offset += 8
     defs["sign_ms"] = Def(T.FLOAT, 1, offset); offset += 4
+    # Percentage of this trace's samples sitting on the ADC rails, so a saturated trace (the
+    # first one after setup, while AC coupling settles, can be clipped end to end) is found by
+    # filtering on a field rather than by eye.
+    defs["clip_pct"] = Def(T.FLOAT, 1, offset); offset += 4
     if getattr(args, "has_nonce", False):
         defs["nonce"] = Def(T.BYTE, NONCE_LEN, offset); offset += NONCE_LEN
     if args.mode == "scalar":
@@ -488,7 +512,7 @@ def _trace_param_defs(args):
 
 
 def _trace_params(args, trace_class, payload, key, signature, nonce=None, t_unix=0.0,
-                  sign_ms=0.0):
+                  sign_ms=0.0, clip_pct=0.0):
     """Per-trace values matching _trace_param_defs: class, message, signature, nonce, (scalar) key."""
     Byte = trsfile.parametermap.ByteArrayParameter
     # The signature is padded/truncated to the fixed field width; a mismatch means the target
@@ -499,7 +523,8 @@ def _trace_params(args, trace_class, payload, key, signature, nonce=None, t_unix
     params = {"ttest": Byte([int(trace_class)]), "msg": Byte(list(payload)),
               "sig": Byte(list(sig)),
               "t_unix": trsfile.parametermap.DoubleArrayParameter([float(t_unix)]),
-              "sign_ms": trsfile.traceparameter.FloatArrayParameter([float(sign_ms)])}
+              "sign_ms": trsfile.traceparameter.FloatArrayParameter([float(sign_ms)]),
+              "clip_pct": trsfile.traceparameter.FloatArrayParameter([float(clip_pct)])}
     if getattr(args, "has_nonce", False):
         nb = bytes(nonce or b"")
         nb = (nb + bytes(NONCE_LEN))[:NONCE_LEN]
@@ -701,6 +726,7 @@ def main():
         "privkey": privkey,
         "fw_version": fw_version,
         "git": git_commit(),
+        "git_changes": git_changes(),
         "created": datetime.datetime.now(datetime.timezone.utc)
                        .strftime("%Y-%m-%dT%H:%M:%SZ"),
         "command": shlex.join(_sys.argv),
@@ -716,6 +742,7 @@ def main():
             # asked for - sample_period_s and window_s are derived from it.
             meta["sample_rate"] = scope.sampleRate
             meta["scope_model"] = getattr(scope, "variant", "unknown")
+            meta["scope_serial"] = getattr(scope, "serial", "")
             # What the limiter really is depends on the model (20 or 25 MHz), not on the flag.
             meta["bw_limit"] = getattr(scope, "bandwidthLimit", "full")
             # time_div describes one tile's window, but SCALE_X is derived as
@@ -740,6 +767,19 @@ def main():
         if pre_trigger_wait:
             print(f"[*] Holding each command back {pre_trigger_wait*1e3:.0f} ms so the trigger "
                   f"edge falls after the pre-trigger window")
+
+        if scope is not None and args.scope == "pico":
+            # The first block after setup can sit on the rail end to end while the AC coupling
+            # settles - trace 0 of the first 6404D set was 100% clipped. Take one and discard it.
+            try:
+                scope.arm(preTrigger=pre_trigger)
+                if pre_trigger_wait:
+                    time.sleep(pre_trigger_wait)
+                target.sign(fixed_payload(args.msg_len))
+                scope.getNativeSignalBytes()
+                print("[*] Discarded one warm-up capture (AC coupling settling)")
+            except TimeoutError as ex:
+                print(f"[!] Warm-up capture failed ({ex}); the campaign loop will retry")
 
         while collected < args.traces:
             try:
@@ -828,12 +868,22 @@ def main():
 
                 if scope is not None:
                     samples = b"".join(tile_samples)
+                    # Both scopes clip their output to the full integer range, so the rails are
+                    # the dtype's min and max.
+                    dtype = np.int16 if args.sample_bits == 16 else np.int8
+                    rails = np.iinfo(dtype)
+                    arr = np.frombuffer(samples, dtype=dtype)
+                    clip_pct = 100.0 * np.count_nonzero((arr == rails.max) | (arr == rails.min)) / arr.size
+                    # sign_ms is the signing alone (summed over tiles). total_ms also holds the
+                    # arm and the read-out - seconds for a deep PicoScope block - and recording
+                    # that under this name made every trace look like a 3 s signature.
                     writer.append(trsfile.Trace(
                         trsfile.SampleCoding.SHORT if args.sample_bits == 16
                         else trsfile.SampleCoding.BYTE,
                         samples,
                         _trace_params(args, trace_class, payload, trace_key,
-                                      signature, nonce, t_unix=sign_start, sign_ms=total_ms),
+                                      signature, nonce, t_unix=sign_start,
+                                      sign_ms=phase["sign"] * 1e3, clip_pct=clip_pct),
                     ))
 
                 # Incremented only on success, so a dropped capture is retried rather than lost.

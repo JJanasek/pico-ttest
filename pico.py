@@ -130,6 +130,7 @@ class pico3000():
         # an immutable bytes literal).
         self.model = ctypes.create_string_buffer(32)
         self.variant = "Unknown"
+        self.serial = ""
         self.channelRanges = {}  # channel -> full scale in volts, for trigger level conversion
         self.requiredSize = ctypes.c_int16()
         self.available_ranges = (ctypes.c_int32 * 15)()
@@ -185,7 +186,13 @@ class pico3000():
         self.status["getinfo"] = self._call("GetUnitInfo", self.chandle, self.model, ctypes.sizeof(self.model), ctypes.byref(self.requiredSize), 3)
         assert_pico_ok(self.status["getinfo"])
         self.variant = self.model.value.decode(errors="replace")
-        print("[*] Picoscope model: PicoScope {}".format(self.variant))
+        # 4 = PICO_BATCH_AND_SERIAL: ties a trace set to the exact instrument. Best effort - a
+        # missing serial is no reason to refuse to capture.
+        serial = ctypes.create_string_buffer(32)
+        if self._call("GetUnitInfo", self.chandle, serial, ctypes.sizeof(serial), ctypes.byref(self.requiredSize), 4) == 0:
+            self.serial = serial.value.decode(errors="replace")
+        print("[*] Picoscope model: PicoScope {}{}".format(
+            self.variant, " (serial {})".format(self.serial) if self.serial else ""))
         if not self.hasExtTrigger():
             print("[!] Model {} has no Ext trigger input (D models only) - trigger on an "
                   "analog channel instead".format(self.variant))

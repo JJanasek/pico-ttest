@@ -475,7 +475,8 @@ class pico3000():
                     .format(ex, self._extNote(), self.variant)) from ex
             raise
 
-        if(DEBUG_MODE):
+        # Once is enough: a campaign arms thousands of times.
+        if DEBUG_MODE and self.capturesTotal == 0:
             print("Block capture started.")
 
     def getNativeSignalBytes(self, timeout=CAPTURE_TIMEOUT):

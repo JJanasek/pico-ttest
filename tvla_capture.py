@@ -803,23 +803,28 @@ def main():
                               f"{sample_rate/1e6:.0f} MS/s = {window_ms:.1f} ms covered, "
                               f"{args.tiles * args.samples:,} samples per trace "
                               f"({args.tiles} signatures, {total_ms/1e3:.1f} s per trace)")
-                        # Where the per-trace time actually goes. Signing is the floor - one
-                        # execution per tile - so only the arm and read shares are worth
-                        # attacking if a campaign is taking too long.
-                        print("[*] Per trace: {:.1f} s signing (the floor), {:.1f} s arming, "
-                              "{:.1f} s reading out - {:.0f} ms per tile outside the signature"
-                              .format(phase["sign"], phase["arm"], phase["read"],
-                                      1e3 * (phase["arm"] + phase["read"]) / args.tiles))
+                    # Where the per-trace time actually goes. Signing is the floor - one
+                    # execution per tile - so only the arm and read shares are worth attacking
+                    # if a campaign is taking too long.
+                    per_tile = (" - {:.0f} ms per tile outside the signature".format(
+                        1e3 * (phase["arm"] + phase["read"]) / args.tiles)
+                        if args.tiles > 1 else "")
+                    print("[*] Per trace: {:.2f} s signing (the floor), {:.2f} s arming, "
+                          "{:.2f} s reading out{}".format(phase["sign"], phase["arm"],
+                                                          phase["read"], per_tile))
                     if sign_ms > window_ms:
                         # Not necessarily a fault: on Husky a partial window is the default,
                         # because dropping the tail is what buys decimate=1 and the resolution
                         # that comes with it. Say what is captured and leave the call to the user.
+                        needed = int(sign_ms * 1e-3 * sample_rate)
+                        if args.scope == "husky":
+                            how = (f" - past Husky's 131,070 sample buffer that needs --stream "
+                                   f"(on by default, up to {HUSKY_MAX_STREAM_RATE / 1e6:.0f} MS/s) "
+                                   f"or --no-stream with a lower --sample-rate")
+                        else:
+                            how = " (the trigger pulse itself is ~101 ms; this includes serial)"
                         print(f"[*] So the window holds the first {window_ms:.0f} ms of it. To "
-                              f"cover the whole signature, raise --samples to "
-                              f">= {int(sign_ms * 1e-3 * args.sample_rate):,} - past Husky's "
-                              f"131,070 sample buffer that needs --stream (on by default, up to "
-                              f"{HUSKY_MAX_STREAM_RATE / 1e6:.0f} MS/s) or --no-stream with a "
-                              f"lower --sample-rate.")
+                              f"cover the whole signature, raise --samples to >= {needed:,}{how}.")
 
                 if scope is not None:
                     samples = b"".join(tile_samples)

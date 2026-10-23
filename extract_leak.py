@@ -8,14 +8,18 @@
 #   python extract_leak.py set.trs -o leak.npz --decim 100 --per-class 20 --center 18.4e6 --half 1e6
 #
 # Output (one .npz):
-#   mean_fixed, mean_random  per-class mean trace, decimated by --decim
+#   mean_fixed, mean_random  per-class mean trace, decimated by --decim (block mean)
+#   env_fixed, env_random    per-class activity envelope: mean over traces of each block's RMS
 #   t                        Welch t at the decimated rate (sign is arbitrary; |t| locates the leak)
 #   win_fixed, win_random    --per-class full-rate traces each, sliced to [center-half, center+half]
 #   meta                     decim, sample_rate, win_lo, counts - everything needed to put it back
 #                            on a real time axis
 #
-# Decimation is a block mean (reshape + mean), which is a brick-wall-ish low-pass: fine for a leak
-# far below the new Nyquist, and it is exactly what makes the <10 kHz peak survive a 100x shrink.
+# Two decimations per block: the block MEAN is a low-pass that keeps the <10 kHz leak alive through
+# a 100x shrink (the t-curve), while the block RMS is the signal's amplitude envelope. The envelope
+# is what shows the operation structure, because the measurement is AC-coupled: the mean of an
+# AC-coupled trace is ~0 everywhere, so only the envelope reveals where the chip is busy (the long
+# uniform r_part ladder, the hashes, the idle gaps).
 import argparse
 import numpy as np
 import trsfile
@@ -62,17 +66,23 @@ def main():
                     continue
                 x = np.asarray(trace.samples)
 
-                # Decimate by block mean; drop the ragged tail so the reshape is exact.
+                # Decimate by block; drop the ragged tail so the reshape is exact. The block mean
+                # feeds mean/t (low-pass that keeps the leak); the block RMS is the activity
+                # envelope that shows the operation structure under AC coupling.
                 m = (x.size // D) * D
-                dec = x[:m].reshape(-1, D).mean(axis=1).astype(np.float64)
+                blk = x[:m].reshape(-1, D).astype(np.float64)
+                dec = blk.mean(axis=1)
+                rms = np.sqrt((blk * blk).mean(axis=1))
                 a = acc[cls]
                 if a is None:
                     a = acc[cls] = {"n": 0,
                                     "s": np.zeros(dec.size),
-                                    "ss": np.zeros(dec.size)}
+                                    "ss": np.zeros(dec.size),
+                                    "r": np.zeros(dec.size)}
                 a["n"] += 1
                 a["s"] += dec
                 a["ss"] += dec * dec
+                a["r"] += rms
 
                 if args.per_class and len(wins[cls]) < args.per_class:
                     wins[cls].append(x[lo:hi].astype(np.int8))
@@ -98,6 +108,8 @@ def main():
     out = {
         "mean_fixed": mf.astype(np.float32),
         "mean_random": mr.astype(np.float32),
+        "env_fixed": (acc[0]["r"] / acc[0]["n"]).astype(np.float32),
+        "env_random": (acc[1]["r"] / acc[1]["n"]).astype(np.float32),
         "t": t.astype(np.float32),
         "meta": np.array([D, args.sample_rate, lo, hi, acc[0]["n"], acc[1]["n"]], dtype=np.float64),
     }

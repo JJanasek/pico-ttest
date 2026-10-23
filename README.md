@@ -96,7 +96,9 @@ ESP32 is `/dev/ttyUSB0` (`--port`). A plugged-in Husky claims a `/dev/ttyACM*` â
 
 ## Firmware
 
-`tvla_capture.py` flashes `esp32dev_tvla` each run unless `--no-flash`. By hand:
+`tvla_capture.py` flashes `esp32dev_tvla` each run unless `--no-flash`. It builds from
+`~/Documents/PlatformIO/Projects/Tropic test` when that project exists (the lab machine's), else
+from the in-repo `firmware/`; `--project-dir` overrides both. By hand:
 
 ```sh
 pio run -d firmware -e esp32dev_tvla -t upload

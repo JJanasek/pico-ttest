@@ -84,6 +84,47 @@ CLASS_FIXED = 0
 CLASS_RANDOM = 1
 
 
+def _msg_with_hw(n, hw, rng):
+    """A random n-byte message with exact total Hamming weight hw and no zero byte.
+
+    Each byte gets at least one set bit (so HW ranges n..8n), then the remaining set bits are
+    scattered at random. The byte patterns are otherwise random, so at a fixed hw only the total
+    weight is held constant - several messages at the same hw differ in their bytes, which is what
+    tells a pure total-HW leak apart from one that depends on the pattern.
+    """
+    if not n <= hw <= 8 * n:
+        raise ValueError(f"HW {hw} unreachable for {n} bytes with no zero byte (need {n}..{8*n})")
+    bits = np.ones(n, dtype=int)
+    extra = int(hw) - n
+    while extra > 0:                       # add set bits to not-yet-full bytes
+        i = int(rng.integers(n))
+        if bits[i] < 8:
+            bits[i] += 1
+            extra -= 1
+    out = bytearray()
+    for b in bits:
+        v = 0
+        for p in rng.choice(8, size=int(b), replace=False):
+            v |= 1 << int(p)
+        out.append(v)
+    return bytes(out)
+
+
+def default_hw_levels(n):
+    """Five Hamming-weight levels spread over the no-zero-byte range (1.5n..7.5n)."""
+    return [int(round(n * f)) for f in (1.5, 3.0, 4.5, 6.0, 7.5)]
+
+
+def hw_sweep_set(msg_len, levels, patterns, seed):
+    """The --hw-sweep message set: `patterns` random messages at each Hamming-weight level."""
+    rng = np.random.default_rng(seed)
+    return [_msg_with_hw(msg_len, hw, rng) for hw in levels for _ in range(patterns)]
+
+
+def hw(msg):
+    return sum(bin(b).count("1") for b in msg)
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         description="Fixed-vs-random TVLA trace collection for TROPIC01 (ESP32 target, "
@@ -108,6 +149,21 @@ def parse_args():
                    help="message length in bytes (default 32; Ed25519 only, up to 256). The nonce "
                         "TMAC runs per 18 B and the SHA-512 per 128 B, so sweeping the length "
                         "shows which part of the trace is message-dependent")
+    p.add_argument("--hw-sweep", action="store_true",
+                   help="message mode: instead of fixed-vs-random, cycle through a fixed set of "
+                        "messages spanning Hamming weight (several patterns per level, no zero "
+                        "bytes). Averaging many traces per message settles whether the message "
+                        "leak is total HW (a load/transport) or depends on the byte pattern (a "
+                        "diffused, TMAC-style absorption), with far fewer traces than random CPA. "
+                        "Records ttest = message index, msg = the bytes signed")
+    p.add_argument("--hw-levels", default=None,
+                   help="comma-separated target total Hamming weights for --hw-sweep "
+                        "(default: 1.5n..7.5n spread over msg_len n)")
+    p.add_argument("--hw-patterns", type=int, default=3,
+                   help="distinct random patterns per HW level for --hw-sweep (default 3); "
+                        "same-HW patterns test whether anything beyond total HW leaks")
+    p.add_argument("--hw-seed", type=int, default=0,
+                   help="RNG seed for the --hw-sweep message set (default 0; reproducible)")
     p.add_argument("-o", "--outdir", default="traces", help="directory for the .trs file")
     p.add_argument("--traces-per-file", type=int, default=0,
                    help="roll over to a new .trs every N traces (0 = one file). A .trs is only "
@@ -252,6 +308,27 @@ def parse_args():
     if not 1 <= args.msg_len <= MAX_MSG_LEN:
         p.error(f"--msg-len must be 1..{MAX_MSG_LEN}")
 
+    args.hw_sweep_msgs = None
+    if args.hw_sweep:
+        if args.mode != "message":
+            p.error("--hw-sweep varies the message; it needs message mode (not scalar)")
+        n = args.msg_len
+        if args.hw_levels:
+            try:
+                levels = [int(x) for x in args.hw_levels.split(",") if x.strip()]
+            except ValueError:
+                p.error("--hw-levels must be comma-separated integers")
+        else:
+            levels = default_hw_levels(n)
+        for h in levels:
+            if not n <= h <= 8 * n:
+                p.error(f"--hw-levels: HW {h} unreachable for {n} bytes with no zero byte "
+                        f"(need {n}..{8*n})")
+        if args.hw_patterns < 1:
+            p.error("--hw-patterns must be >= 1")
+        args.hw_levels_list = levels
+        args.hw_sweep_msgs = hw_sweep_set(n, levels, args.hw_patterns, args.hw_seed)
+
     if args.priv_key is not None:
         if args.mode != "message":
             p.error("--priv-key is for message mode; scalar mode already sets the key per trace")
@@ -368,6 +445,13 @@ def trace_set_params(args, n_samples, pre_trigger, meta):
     p["pre_trigger_samples"] = i(pre_trigger)
     p["fixed_payload"] = b(fixed_payload(args.msg_len))
     p["msg_len"] = i(args.msg_len)
+    if getattr(args, "hw_sweep_msgs", None):
+        p["msg_scheme"] = s("hw-sweep: ttest = message index (not fixed-vs-random); msg = the "
+                            "signed bytes; Hamming weight = popcount(msg)")
+        p["hw_levels"] = s(",".join(str(x) for x in args.hw_levels_list))
+        p["hw_patterns"] = i(args.hw_patterns)
+        p["hw_seed"] = i(args.hw_seed)
+        p["hw_messages"] = s(",".join(m.hex() for m in args.hw_sweep_msgs))
     p["sample_period_s"] = d(1.0 / meta.get("sample_rate", args.sample_rate))
     p["window_s"] = d(n_samples / meta.get("sample_rate", args.sample_rate))
     # Time origin: nothing else in the file says what t=0 is.
@@ -781,11 +865,31 @@ def main():
             except TimeoutError as ex:
                 print(f"[!] Warm-up capture failed ({ex}); the campaign loop will retry")
 
+        # --hw-sweep: draw each trace's message index from a reshuffled bag of the whole set, so
+        # every message gets equal counts and the order is reshuffled each pass (drift hits all).
+        msg_schedule = None
+        if getattr(args, "hw_sweep_msgs", None):
+            _bag = []
+
+            def msg_schedule():
+                if not _bag:
+                    _bag.extend(int(j) for j in np.random.permutation(len(args.hw_sweep_msgs)))
+                return _bag.pop()
+
+            print(f"[*] HW-sweep: {len(args.hw_sweep_msgs)} messages, {args.hw_patterns} "
+                  f"patterns x levels {args.hw_levels_list} (ttest = message index):")
+            for idx, mm in enumerate(args.hw_sweep_msgs):
+                print(f"      [{idx:2d}] HW {hw(mm):3d}  {mm.hex()}")
+
         while collected < args.traces:
             try:
-                # Randomly interleave the two classes so slow drift affects both equally.
-                trace_class = CLASS_FIXED if np.random.randint(0, 2) == 0 else CLASS_RANDOM
-                payload, trace_key = prepare_trial(args, target, trace_class)
+                if msg_schedule is not None:
+                    trace_class = msg_schedule()
+                    payload, trace_key = args.hw_sweep_msgs[trace_class], None
+                else:
+                    # Randomly interleave the two classes so slow drift affects both equally.
+                    trace_class = CLASS_FIXED if np.random.randint(0, 2) == 0 else CLASS_RANDOM
+                    payload, trace_key = prepare_trial(args, target, trace_class)
 
                 # One signature per tile, all signing the same payload with the same key. The
                 # signature nonce differs per tile (TROPIC01 folds the per-command secure-channel

@@ -165,7 +165,15 @@ find .pio/libdeps -maxdepth 3 -type d \( -name libtropic_build -o -name hal_cal_
 
 ## Requirements
 
-`numpy`, `pyserial`, `trsfile`, PlatformIO CLI. For `--scope husky`: `chipwhisperer` (in `~/.cwvenv`).
-For `--scope pico`: PicoSDK + `picosdk` bindings, with the driver for your series (`libps3000a`,
-`libps2000a` or `libps6000`). Only the selected series' library is loaded; if the SDK sits outside
-the linker path, point `LD_LIBRARY_PATH` at its `lib/`.
+`pip install -r requirements.txt` covers the pip-installable parts; see that file for the full,
+grouped list. In short:
+
+* **Analysis only** (handed a `.trs`): `numpy`, `trsfile`, `matplotlib`, `cryptography` — pure
+  Python, no hardware. This is all the Tropic-side analysis scripts need.
+* **Capture** additionally needs `pyserial`, the PlatformIO CLI (builds/flashes the ESP32
+  firmware), and one scope backend:
+  * `--scope husky`: `chipwhisperer` (in `~/.cwvenv`).
+  * `--scope pico`: `picosdk` bindings **plus** Pico Technology's PicoSDK C libraries for your
+    series (`libps3000a`, `libps2000a` or `libps6000`) — a vendor download, not pip. Only the
+    selected series' library is loaded; if the SDK sits outside the linker path, point
+    `LD_LIBRARY_PATH` at its `lib/`.

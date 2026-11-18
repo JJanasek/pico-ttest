@@ -1,0 +1,31 @@
+# TROPIC01 TVLA capture + analysis - Python dependencies.
+# Python 3.8+ (developed on 3.14). Install everything pip-installable with:
+#     pip install -r requirements.txt
+# then add the scope / firmware tools from the two non-pip notes at the bottom.
+
+# --- core: needed by every script (read/write .trs, numerics) ---
+numpy
+trsfile
+
+# --- analysis scripts (figures + Ed25519 nonce recovery) ---
+# extract_leak.py, cpa_leak.py, analyze_hwsweep.py, ladder_cpa.py, per_bit_dpa.py, trs_info.py
+matplotlib          # plots
+cryptography        # Ed25519 public-key derivation + signature verify (nonce recovery)
+
+# --- capture host only (tvla_capture.py, sign_loop.py, trigger_check.py) ---
+pyserial            # serial link to the ESP32 target
+
+# --- scope backend: install ONLY the one you use (both pull extra, hardware-specific deps) ---
+# PicoScope  (--scope pico):  pip install picosdk   -- AND Pico Technology's PicoSDK C libraries
+#                             (libps6000 / libps2000a / libps3000a), a vendor download, not pip.
+# Husky      (--scope husky): pip install chipwhisperer
+# picosdk
+# chipwhisperer
+
+# ----------------------------------------------------------------------------------------------
+# NOT pip-installable (install separately, capture side only):
+#   * PicoSDK C libraries  - https://www.picotech.com/downloads  (point LD_LIBRARY_PATH at its lib/
+#     if it is outside the linker path; only the driver for your series is loaded at runtime).
+#   * PlatformIO CLI       - builds/flashes the ESP32 firmware:  pip install platformio  (or the
+#     official installer). Pulls the ESP32 toolchain on first build.
+# Pure trace analysis (handed a .trs file) needs none of the above - only the core + analysis rows.

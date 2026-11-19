@@ -20,27 +20,39 @@ Default scope is a ChipWhisperer-Husky (`--scope husky`); a PicoScope path is un
 ## Installation
 
 Developed on Linux; a laptop only needs the software below to drive the rig over USB (one cable to
-the ESP32, one to the PicoScope). For a PicoScope, **Ubuntu LTS (22.04 / 24.04) is the smoothest** —
-Pico Technology officially supports it with an apt repository. Fedora works too, but its PicoScope
-driver has to be installed by hand (no official Fedora package).
+the ESP32, one to the PicoScope). Works on **Ubuntu** and **Fedora** — the only difference is the
+PicoScope C driver (below): Pico ships an official apt package for Ubuntu, while Fedora needs a
+manual step. If you are setting up fresh for a PicoScope, Ubuntu LTS (22.04 / 24.04) is the tested,
+lower-friction path.
 
 ```sh
+sudo apt install git python3 python3-pip        # Ubuntu/Debian
+sudo dnf install git python3 python3-pip        # Fedora
 git clone <this-repo-url> && cd pico-ttest
 pip install -r requirements.txt     # numpy, trsfile, pyserial, matplotlib, cryptography, platformio
 ```
 
 **Scope backend — install only the one for your scope** (both pull extra, hardware-specific deps):
 
-* **PicoScope** (`--scope pico`) — the Python wrapper plus Pico's C driver (pip does not cover the
-  driver). Follow <https://www.picotech.com/downloads/linux> to add Pico's apt repo, then:
+* **PicoScope** (`--scope pico`) — the `picosdk` Python wrapper (via pip) plus Pico's C driver,
+  which pip does **not** provide:
 
   ```sh
   pip install picosdk
-  sudo apt install libps6000      # ps6000 driver for the 6404D (libps2000a / libps3000a for those series)
   ```
 
-  Libraries land under `/opt/picoscope`; if the loader can't find them, point `LD_LIBRARY_PATH` at
-  its `lib/`. Only the driver for the selected series is loaded at runtime.
+  * **Ubuntu/Debian** (official): add Pico's apt repo per
+    <https://www.picotech.com/downloads/linux>, then
+    `sudo apt install libps6000` (ps6000 driver for the 6404D; `libps2000a` / `libps3000a` for
+    those series).
+  * **Fedora** (no official package): use Pico's RPM repo with `dnf`
+    (`https://labs.picotech.com/.../rpm`, see the same Linux page), **or** convert the Debian
+    package (`sudo dnf install alien; sudo alien --to-rpm libps6000_*.deb; sudo dnf install
+    ./libps6000-*.rpm`), **or** drop the `libps6000.so*` files anywhere and set `LD_LIBRARY_PATH`.
+    These are unofficial — verify the driver loads before a long run.
+
+  Ubuntu's libraries land under `/opt/picoscope`; if the loader can't find the driver either way,
+  point `LD_LIBRARY_PATH` at its `lib/`. Only the driver for the selected series is loaded.
 
 * **ChipWhisperer-Husky** (`--scope husky`, the default) — no Pico driver:
 

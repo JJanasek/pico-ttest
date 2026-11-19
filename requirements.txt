@@ -12,8 +12,9 @@ trsfile
 matplotlib          # plots
 cryptography        # Ed25519 public-key derivation + signature verify (nonce recovery)
 
-# --- capture host only (tvla_capture.py, sign_loop.py, trigger_check.py) ---
+# --- capture host (tvla_capture.py, sign_loop.py, trigger_check.py) ---
 pyserial            # serial link to the ESP32 target
+platformio          # builds/flashes the ESP32 firmware; pulls libtropic + the toolchain on 1st build
 
 # --- scope backend: install ONLY the one you use (both pull extra, hardware-specific deps) ---
 # PicoScope  (--scope pico):  pip install picosdk   -- AND Pico Technology's PicoSDK C libraries
@@ -23,9 +24,8 @@ pyserial            # serial link to the ESP32 target
 # chipwhisperer
 
 # ----------------------------------------------------------------------------------------------
-# NOT pip-installable (install separately, capture side only):
-#   * PicoSDK C libraries  - https://www.picotech.com/downloads  (point LD_LIBRARY_PATH at its lib/
-#     if it is outside the linker path; only the driver for your series is loaded at runtime).
-#   * PlatformIO CLI       - builds/flashes the ESP32 firmware:  pip install platformio  (or the
-#     official installer). Pulls the ESP32 toolchain on first build.
-# Pure trace analysis (handed a .trs file) needs none of the above - only the core + analysis rows.
+# NOT pip-installable (capture side only): the PicoSDK C libraries themselves -
+#   https://www.picotech.com/downloads/linux  (apt: `sudo apt install libps6000`; point
+#   LD_LIBRARY_PATH at /opt/picoscope/lib if the loader can't find them). `picosdk` above is only
+#   the Python wrapper over these.
+# Pure trace analysis (handed a .trs file) needs only the core + analysis rows - no capture tools.

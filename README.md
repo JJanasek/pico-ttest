@@ -17,6 +17,44 @@ Default scope is a ChipWhisperer-Husky (`--scope husky`); a PicoScope path is un
 | [trs_info.py](trs_info.py) | print a set's metadata (key, scope setup, per-trace fields) |
 | [firmware/](firmware/) | PlatformIO project (`esp32dev_tvla`) that builds the capture firmware |
 
+## Installation
+
+Developed on Linux; a laptop only needs the software below to drive the rig over USB (one cable to
+the ESP32, one to the PicoScope). For a PicoScope, **Ubuntu LTS (22.04 / 24.04) is the smoothest** —
+Pico Technology officially supports it with an apt repository. Fedora works too, but its PicoScope
+driver has to be installed by hand (no official Fedora package).
+
+```sh
+git clone <this-repo-url> && cd pico-ttest
+pip install -r requirements.txt     # numpy, trsfile, pyserial, matplotlib, cryptography, platformio
+```
+
+**PicoScope driver (`--scope pico`)** — the one part pip does not cover. `pip install picosdk`
+installs only the Python wrapper; the C libraries come from Pico Technology. Follow
+<https://www.picotech.com/downloads/linux> to add their apt repo, then:
+
+```sh
+pip install picosdk
+sudo apt install libps6000          # ps6000 driver for the 6404D (libps2000a / libps3000a for those series)
+```
+
+Libraries land under `/opt/picoscope`; if the loader can't find them, point `LD_LIBRARY_PATH` at its
+`lib/`. Only the driver for the selected series is loaded at runtime. For a **ChipWhisperer-Husky**
+instead, `pip install chipwhisperer` (the examples use a `~/.cwvenv` virtualenv) and no Pico driver.
+
+**Firmware** needs nothing placed by hand: PlatformIO (installed above) pulls libtropic and the
+ESP32 toolchain on the first build, and `tvla_capture.py` builds from [firmware/](firmware/)
+automatically. See [firmware/README.md](firmware/README.md) for flashing/ports.
+
+Driving the reference rig (PicoScope 6404D, trigger on channel B via a probe):
+
+```sh
+python tvla_capture.py --scope pico --pico-series 6000 --trigger-source B \
+    --trigger-level 0.2 --trigger-range 0.5 \
+    --sample-rate 1.25e9 --samples 62.5e6 --pre-trigger 2% \
+    -n 2000 --traces-per-file 500 --probe "x1 passive on shunt" --port /dev/ttyUSB0
+```
+
 ## Quick start
 
 ```sh

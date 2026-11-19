@@ -29,18 +29,28 @@ git clone <this-repo-url> && cd pico-ttest
 pip install -r requirements.txt     # numpy, trsfile, pyserial, matplotlib, cryptography, platformio
 ```
 
-**PicoScope driver (`--scope pico`)** — the one part pip does not cover. `pip install picosdk`
-installs only the Python wrapper; the C libraries come from Pico Technology. Follow
-<https://www.picotech.com/downloads/linux> to add their apt repo, then:
+**Scope backend — install only the one for your scope** (both pull extra, hardware-specific deps):
 
-```sh
-pip install picosdk
-sudo apt install libps6000          # ps6000 driver for the 6404D (libps2000a / libps3000a for those series)
-```
+* **PicoScope** (`--scope pico`) — the Python wrapper plus Pico's C driver (pip does not cover the
+  driver). Follow <https://www.picotech.com/downloads/linux> to add Pico's apt repo, then:
 
-Libraries land under `/opt/picoscope`; if the loader can't find them, point `LD_LIBRARY_PATH` at its
-`lib/`. Only the driver for the selected series is loaded at runtime. For a **ChipWhisperer-Husky**
-instead, `pip install chipwhisperer` (the examples use a `~/.cwvenv` virtualenv) and no Pico driver.
+  ```sh
+  pip install picosdk
+  sudo apt install libps6000      # ps6000 driver for the 6404D (libps2000a / libps3000a for those series)
+  ```
+
+  Libraries land under `/opt/picoscope`; if the loader can't find them, point `LD_LIBRARY_PATH` at
+  its `lib/`. Only the driver for the selected series is loaded at runtime.
+
+* **ChipWhisperer-Husky** (`--scope husky`, the default) — no Pico driver:
+
+  ```sh
+  pip install chipwhisperer
+  ```
+
+  First USB use may need the ChipWhisperer udev rules (add yourself to `plugdev`, or follow the
+  [ChipWhisperer install docs](https://chipwhisperer.readthedocs.io/en/latest/linux-install.html));
+  the examples run it from a `~/.cwvenv` virtualenv.
 
 **Firmware** needs nothing placed by hand: PlatformIO (installed above) pulls libtropic and the
 ESP32 toolchain on the first build, and `tvla_capture.py` builds from [firmware/](firmware/)
